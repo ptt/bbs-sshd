@@ -1,0 +1,14 @@
+[package]
+name = "bbs-sshd"
+version = "0.1.0"
+edition = "2018"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+bytes = "1.0.1"
+futures = "0.3.15"
+telnet = "0.1.4"
+thrussh = "0.32.9"
+thrussh-keys = "0.20.4"
+tokio = { version = "1.6.0", features = ["time"] }
