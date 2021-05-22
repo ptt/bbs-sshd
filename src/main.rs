@@ -16,6 +16,7 @@ use thrussh::server::Handle;
 use thrussh::server::Session;
 use thrussh::ChannelId;
 use tokio::net::UnixStream;
+use tokio::signal::unix::{signal, SignalKind};
 
 #[derive(Clone, Copy, Debug)]
 struct WindowSize {
@@ -320,24 +321,38 @@ async fn main() {
     }
     let config = Arc::new(config);
 
+    let mut sigint = signal(SignalKind::interrupt()).unwrap();
+    let mut sigterm = signal(SignalKind::terminate()).unwrap();
+
     let listener = socket_linux::new_listener(
         SocketAddr::from_str("0.0.0.0:2222").expect("unable to parse bind address"),
         10,
     )
     .expect("unable to create listener socket");
+
+    let mut client_handles = Vec::new();
     loop {
-        let (stream, client_addr) = listener
-            .accept()
-            .await
-            .expect("unable to accept connection");
+        tokio::select! {
+            biased;
+            _ = sigint.recv() => break,
+            _ = sigterm.recv() => break,
+            accepted = listener.accept() => {
+                let (stream, client_addr) = accepted.expect("unable to accept connection");
 
-        let stream =
-            socket_linux::set_client_conn_options(stream).expect("unable to set socket options");
-
-        tokio::spawn(thrussh::server::run_stream(
-            config.clone(),
-            stream,
-            Handler::new(client_addr),
-        ));
+                let stream =
+                    socket_linux::set_client_conn_options(stream)
+                    .expect("unable to set socket options");
+                client_handles.push(tokio::spawn(thrussh::server::run_stream(
+                    config.clone(),
+                    stream,
+                    Handler::new(client_addr),
+                )));
+            }
+        }
+    }
+    std::mem::drop(listener);
+    println!("Signal caught, draining clients");
+    for handle in client_handles.into_iter() {
+        let _ = handle.await;
     }
 }

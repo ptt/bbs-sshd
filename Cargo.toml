@@ -13,7 +13,7 @@ telnet = "0.1.4"
 #thrussh-keys = "0.20.4"
 thrussh = { path = "/home/robert/thrussh/thrussh" }
 thrussh-keys = { path = "/home/robert/thrussh/thrussh-keys" }
-tokio = { version = "1.6.0", features = ["time"] }
+tokio = { version = "1.6.0", features = ["signal", "time"] }
 env_logger = "0.8.3"
 libc = "0.2.94"
 socket2 = { version = "0.4.0", features = ["all"] }
