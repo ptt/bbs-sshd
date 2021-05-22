@@ -288,6 +288,11 @@ async fn main() {
         .keys
         .push(thrussh_keys::key::KeyPair::generate_ed25519().unwrap());
     config.methods = thrussh::MethodSet::KEYBOARD_INTERACTIVE;
+    if false {
+        // debug rekey
+        config.limits.rekey_time_limit = Duration::from_secs(10);
+        config.limits.rekey_write_limit = 16384;
+    }
     let config = Arc::new(config);
 
     let listener = socket_linux::new_listener(
