@@ -1,10 +1,12 @@
 mod async_telnet;
 mod logind;
+mod socket_linux;
 use futures::FutureExt;
 use std::cmp;
 use std::future;
 use std::net::SocketAddr;
 use std::pin::Pin;
+use std::str::FromStr;
 use std::sync::Arc;
 use std::time::Duration;
 use telnet::TelnetEvent;
@@ -37,6 +39,15 @@ impl Drop for Handler {
 }
 
 impl Handler {
+    fn new(client_addr: SocketAddr) -> Self {
+        Handler {
+            addr: client_addr,
+            encoding: logind::ConnData::CONV_NORMAL,
+            telnet: None,
+            channel: None,
+        }
+    }
+
     async fn send_to_conn(conn: &UnixStream, data: Vec<u8>) -> std::io::Result<()> {
         let mut sent = 0;
         while sent < data.len() {
@@ -266,23 +277,9 @@ impl thrussh::server::Handler for Handler {
     }
 }
 
-struct Server {}
-
-impl thrussh::server::Server for Server {
-    type Handler = Handler;
-
-    fn new(&mut self, peer_addr: Option<SocketAddr>) -> Self::Handler {
-        Handler {
-            addr: peer_addr.unwrap(),
-            encoding: logind::ConnData::CONV_NORMAL,
-            telnet: None,
-            channel: None,
-        }
-    }
-}
-
 #[tokio::main]
 async fn main() {
+    env_logger::init();
     let mut config = thrussh::server::Config::default();
     config.server_id = "SSH-2.0-bbs-sshd".to_string();
     config.auth_rejection_time = Duration::ZERO;
@@ -292,8 +289,25 @@ async fn main() {
         .push(thrussh_keys::key::KeyPair::generate_ed25519().unwrap());
     config.methods = thrussh::MethodSet::KEYBOARD_INTERACTIVE;
     let config = Arc::new(config);
-    let server = Server {};
-    thrussh::server::run(config, "0.0.0.0:2222", server)
-        .await
-        .unwrap();
+
+    let listener = socket_linux::new_listener(
+        SocketAddr::from_str("0.0.0.0:2222").expect("unable to parse bind address"),
+        10,
+    )
+    .expect("unable to create listener socket");
+    loop {
+        let (stream, client_addr) = listener
+            .accept()
+            .await
+            .expect("unable to accept connection");
+
+        let stream =
+            socket_linux::set_client_conn_options(stream).expect("unable to set socket options");
+
+        tokio::spawn(thrussh::server::run_stream(
+            config.clone(),
+            stream,
+            Handler::new(client_addr),
+        ));
+    }
 }
