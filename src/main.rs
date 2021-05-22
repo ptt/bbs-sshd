@@ -2,6 +2,7 @@ mod async_telnet;
 mod logind;
 mod socket_linux;
 use futures::FutureExt;
+use std::borrow::Cow;
 use std::cmp;
 use std::future;
 use std::net::SocketAddr;
@@ -175,22 +176,44 @@ impl thrussh::server::Handler for Handler {
         future::ready(Ok((self, session))).boxed()
     }
 
-    fn auth_keyboard_interactive(
-        mut self,
-        user: &str,
-        _submethods: &str,
-        response: Option<thrussh::server::Response<'_>>,
-    ) -> Self::FutureAuth {
-        println!(
-            "auth_keyboard_interactive: {}, response {:?}",
-            user, response
-        );
+    fn auth_none(mut self, user: &str) -> Self::FutureAuth {
+        println!("auth_none: {}", user);
         match user {
             "bbs" => self.encoding = logind::ConnData::CONV_NORMAL,
             "bbsu" => self.encoding = logind::ConnData::CONV_UTF8,
             _ => return future::ready(Ok((self, Auth::Reject))),
         }
         future::ready(Ok((self, Auth::Accept)))
+    }
+
+    fn auth_keyboard_interactive(
+        self,
+        user: &str,
+        _submethods: &str,
+        response: Option<thrussh::server::Response<'_>>,
+    ) -> Self::FutureAuth {
+        // If we reach here, the user is neither "bbs" nor "bbsu".
+        println!(
+            "auth_keyboard_interactive: {}, response {:?}",
+            user, response
+        );
+        if response.is_none() {
+            future::ready(Ok((
+                self,
+                Auth::Partial {
+                    name: Cow::from("(BBS SSH Only)"),
+                    instructions: Cow::from(
+                        "Please use user \"bbs\" for Big5 or \"bbsu\" for UTF-8.",
+                    ),
+                    prompts: Cow::from(vec![(
+                        Cow::from(format!("User {} is not recognized.\n", user)),
+                        true,
+                    )]),
+                },
+            )))
+        } else {
+            future::ready(Ok((self, Auth::Reject)))
+        }
     }
 
     fn channel_open_session(
@@ -287,7 +310,9 @@ async fn main() {
     config
         .keys
         .push(thrussh_keys::key::KeyPair::generate_ed25519().unwrap());
-    config.methods = thrussh::MethodSet::KEYBOARD_INTERACTIVE;
+    // Per RFC 4252 Sec. 7, "publickey" method is required. However, we are not going to accept it.
+    // "keyboard-interactive" is used for printing out error messages about bad user names.
+    config.methods = thrussh::MethodSet::PUBLICKEY | thrussh::MethodSet::KEYBOARD_INTERACTIVE;
     if false {
         // debug rekey
         config.limits.rekey_time_limit = Duration::from_secs(10);
