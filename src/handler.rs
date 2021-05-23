@@ -4,13 +4,13 @@ use futures::FutureExt;
 use std::borrow::Cow;
 use std::cmp;
 use std::future;
+use std::io;
 use std::net::SocketAddr;
 use std::pin::Pin;
 use std::sync::Arc;
 use telnet::TelnetEvent;
-use thrussh::server::Auth;
-use thrussh::server::Handle;
-use thrussh::server::Session;
+use thrussh::server;
+use thrussh::server::{Auth, Handle, Session};
 use thrussh::ChannelId;
 use tokio::net::UnixStream;
 
@@ -40,13 +40,13 @@ impl Handler {
         }
     }
 
-    async fn send_to_conn(conn: &UnixStream, data: Vec<u8>) -> std::io::Result<()> {
+    async fn send_to_conn(conn: &UnixStream, data: Vec<u8>) -> io::Result<()> {
         let mut sent = 0;
         while sent < data.len() {
             conn.writable().await?;
             match conn.try_write(&data[sent..]) {
                 Ok(n) => sent += n,
-                Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => continue,
+                Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => continue,
                 Err(e) => return Err(e),
             };
         }
@@ -143,12 +143,12 @@ impl Handler {
         self.channel.is_some() && self.channel.unwrap() == channel
     }
 
-    fn wrong_channel() -> <Self as thrussh::server::Handler>::FutureUnit {
+    fn wrong_channel() -> <Self as server::Handler>::FutureUnit {
         future::ready(Err(thrussh::Error::WrongChannel)).boxed()
     }
 }
 
-impl thrussh::server::Handler for Handler {
+impl server::Handler for Handler {
     type Error = thrussh::Error;
     type FutureAuth = future::Ready<Result<(Self, Auth), Self::Error>>;
     type FutureBool = future::Ready<Result<(Self, Session, bool), Self::Error>>;
