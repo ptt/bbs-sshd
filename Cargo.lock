@@ -42,6 +42,7 @@ dependencies = [
  "env_logger",
  "futures",
  "libc",
+ "log",
  "socket2",
  "telnet",
  "thrussh",
@@ -582,8 +583,6 @@ dependencies = [
 [[package]]
 name = "telnet"
 version = "0.1.4"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3eb466fac9217be30197774bcfd417f711dcd730d9cc6d7ea4ac85728c0cb9d5"
 
 [[package]]
 name = "termcolor"

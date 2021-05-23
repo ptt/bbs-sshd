@@ -8,7 +8,8 @@ edition = "2018"
 [dependencies]
 bytes = "1.0.1"
 futures = "0.3.15"
-telnet = "0.1.4"
+#telnet = "0.1.4"
+telnet = { path = "/home/robert/telnet-rs" }
 #thrussh = "0.32.9"
 #thrussh-keys = "0.20.4"
 thrussh = { path = "/home/robert/thrussh/thrussh" }
@@ -17,3 +18,4 @@ tokio = { version = "1.6.0", features = ["signal", "time"] }
 env_logger = "0.8.3"
 libc = "0.2.94"
 socket2 = { version = "0.4.0", features = ["all"] }
+log = "0.4.14"

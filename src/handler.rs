@@ -1,6 +1,7 @@
 use crate::async_telnet;
 use crate::logind;
 use futures::FutureExt;
+use log::{debug, warn};
 use std::borrow::Cow;
 use std::cmp;
 use std::future;
@@ -23,7 +24,7 @@ pub(crate) struct Handler {
 
 impl Drop for Handler {
     fn drop(&mut self) {
-        println!("drop!");
+        debug!("[client {}] dropping handler", self.addr);
         if let Some(telnet) = &self.telnet {
             telnet.shutdown_write();
         }
@@ -54,6 +55,7 @@ impl Handler {
     }
 
     async fn forward_telnet_to_client(
+        addr: SocketAddr,
         telnet: Arc<async_telnet::Telnet>,
         mut handle: Handle,
         channel: ChannelId,
@@ -61,18 +63,18 @@ impl Handler {
         loop {
             match telnet.read().await {
                 Ok(TelnetEvent::Data(data)) => {
-                    if handle.data(channel, data.to_vec().into()).await.is_err() {
-                        println!("connection abort");
+                    if let Err(e) = handle.data(channel, data.to_vec().into()).await {
+                        debug!("[client {}] failed sending to client: {:?}", addr, e);
                         break;
                     }
                 }
                 Ok(TelnetEvent::Error(msg)) => {
-                    println!("telnet eof: {}", msg);
+                    debug!("[client {}] upstream telnet error: {}", addr, msg);
                     break;
                 }
-                Ok(event) => println!("telnet event: {:?}", event),
+                Ok(event) => debug!("[client {}] upstream telnet event: {:?}", addr, event),
                 Err(err) => {
-                    println!("read error: {:?}", err);
+                    debug!("[client {}] upstream read error: {:?}", addr, err);
                     break;
                 }
             }
@@ -97,6 +99,7 @@ impl Handler {
         let telnet = Arc::new(async_telnet::Telnet::new(conn, 1024));
         self.telnet = Some(telnet.clone());
         tokio::spawn(Self::forward_telnet_to_client(
+            self.addr,
             telnet.clone(),
             session.handle(),
             channel,
@@ -132,7 +135,7 @@ impl Handler {
     }
 
     async fn client_eof(self, session: Session) -> Result<(Self, Session), thrussh::Error> {
-        println!("client_eof");
+        debug!("[client {}] client eof", self.addr);
         if let Some(telnet) = &self.telnet {
             telnet.shutdown_write();
         }
@@ -168,7 +171,7 @@ impl server::Handler for Handler {
     }
 
     fn auth_none(mut self, user: &str) -> Self::FutureAuth {
-        println!("auth_none: {}", user);
+        debug!("[client {}] auth_none: {}", self.addr, user);
         match user {
             "bbs" => self.encoding = logind::ConnData::CONV_NORMAL,
             "bbsu" => self.encoding = logind::ConnData::CONV_UTF8,
@@ -180,13 +183,13 @@ impl server::Handler for Handler {
     fn auth_keyboard_interactive(
         self,
         user: &str,
-        _submethods: &str,
+        submethods: &str,
         response: Option<thrussh::server::Response<'_>>,
     ) -> Self::FutureAuth {
         // If we reach here, the user is neither "bbs" nor "bbsu".
-        println!(
-            "auth_keyboard_interactive: {}, response {:?}",
-            user, response
+        debug!(
+            "[client {}] auth_keyboard_interactive: user {}, submethods {}, response {:?}",
+            self.addr, user, submethods, response
         );
         if response.is_none() {
             future::ready(Ok((
@@ -213,11 +216,14 @@ impl server::Handler for Handler {
         mut session: Session,
     ) -> Self::FutureUnit {
         if self.channel.is_some() {
-            println!("channel_open_session: failed");
+            warn!(
+                "[client {}] channel_open_session: there is already an existing channel",
+                self.addr
+            );
             session.channel_failure(channel);
             self.finished(session)
         } else {
-            println!("channel_open_session: success");
+            debug!("[client {}] channel_open_session: opened", self.addr);
             session.channel_success(channel);
             self.channel = Some(channel);
             self.start_conn(session, channel).boxed()
@@ -235,9 +241,9 @@ impl server::Handler for Handler {
         modes: &[(thrussh::Pty, u32)],
         session: Session,
     ) -> Self::FutureUnit {
-        println!(
-            "pty_request: term {}, {} cols {} rows, pix w {} h {}, modes: {:?}",
-            term, col_width, row_height, pix_width, pix_height, modes
+        debug!(
+            "[client {}] pty_request: term {}, {} cols {} rows, pix w {} h {}, modes: {:?}",
+            self.addr, term, col_width, row_height, pix_width, pix_height, modes
         );
         if !self.check_channel(channel) {
             return Self::wrong_channel();
@@ -255,9 +261,9 @@ impl server::Handler for Handler {
         pix_height: u32,
         session: Session,
     ) -> Self::FutureUnit {
-        println!(
-            "window_change_request: {} cols {} rows, pix w {} h {}",
-            col_width, row_height, pix_width, pix_height
+        debug!(
+            "[client {}] window_change_request: {} cols {} rows, pix w {} h {}",
+            self.addr, col_width, row_height, pix_width, pix_height
         );
         if !self.check_channel(channel) {
             return Self::wrong_channel();

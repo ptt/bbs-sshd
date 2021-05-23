@@ -2,6 +2,7 @@ mod async_telnet;
 mod handler;
 mod logind;
 mod socket_linux;
+use log::info;
 use std::net::SocketAddr;
 use std::str::FromStr;
 use std::sync::Arc;
@@ -58,7 +59,7 @@ async fn main() {
         }
     }
     std::mem::drop(listener);
-    println!("Signal caught, draining clients");
+    info!("Signal caught, draining clients");
     for handle in client_handles.into_iter() {
         let _ = handle.await;
     }
