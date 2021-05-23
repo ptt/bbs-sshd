@@ -1,7 +1,8 @@
-mod async_telnet;
+#![feature(destructuring_assignment)]
 mod handler;
 mod logind;
 mod socket_linux;
+mod telnet;
 use log::info;
 use std::net::SocketAddr;
 use std::str::FromStr;

@@ -1,5 +1,5 @@
-use crate::async_telnet;
 use crate::logind;
+use crate::telnet;
 use futures::FutureExt;
 use log::{debug, warn};
 use std::borrow::Cow;
@@ -8,17 +8,71 @@ use std::future;
 use std::io;
 use std::net::SocketAddr;
 use std::pin::Pin;
-use std::sync::Arc;
-use telnet::TelnetEvent;
 use thrussh::server;
 use thrussh::server::{Auth, Handle, Session};
 use thrussh::ChannelId;
 use tokio::net::UnixStream;
 
+struct TelnetHandler {
+    ssh: Handle,
+    channel: ChannelId,
+}
+
+impl TelnetHandler {
+    fn new(handle: Handle, channel: ChannelId) -> Self {
+        TelnetHandler {
+            ssh: handle,
+            channel,
+        }
+    }
+
+    async fn send_data(
+        mut self,
+        remote: telnet::Remote,
+        data: thrussh::CryptoVec,
+    ) -> io::Result<(Self, telnet::Remote)> {
+        match self.ssh.data(self.channel, data).await {
+            Ok(_) => Ok((self, remote)),
+            Err(e) => {
+                debug!("send_data: error {:?}", e);
+                Err(io::Error::from(io::ErrorKind::ConnectionReset))
+            }
+        }
+    }
+
+    async fn send_eof(mut self, remote: telnet::Remote) -> io::Result<(Self, telnet::Remote)> {
+        _ = self.ssh.eof(self.channel).await;
+        _ = self.ssh.close(self.channel).await;
+        Ok((self, remote))
+    }
+}
+
+impl telnet::Handler for TelnetHandler {
+    type FutureUnit =
+        Pin<Box<dyn future::Future<Output = io::Result<(Self, telnet::Remote)>> + Send>>;
+
+    fn unit(self, remote: telnet::Remote) -> Self::FutureUnit {
+        future::ready(Ok((self, remote))).boxed()
+    }
+
+    fn command(self, remote: telnet::Remote, cmd: u8, opt: Option<u8>) -> Self::FutureUnit {
+        debug!("telnet command {} opt {:?}", cmd, opt);
+        self.unit(remote)
+    }
+
+    fn data(self, remote: telnet::Remote, data: &[u8]) -> Self::FutureUnit {
+        self.send_data(remote, data.to_vec().into()).boxed()
+    }
+
+    fn eof(self, remote: telnet::Remote) -> Self::FutureUnit {
+        self.send_eof(remote).boxed()
+    }
+}
+
 pub(crate) struct Handler {
     addr: SocketAddr,
     encoding: u32,
-    telnet: Option<Arc<async_telnet::Telnet>>,
+    telnet: Option<telnet::Telnet>,
     channel: Option<ChannelId>,
 }
 
@@ -26,7 +80,7 @@ impl Drop for Handler {
     fn drop(&mut self) {
         debug!("[client {}] dropping handler", self.addr);
         if let Some(telnet) = &self.telnet {
-            telnet.shutdown_write();
+            tokio::spawn(Self::upstream_shutdown_write(telnet.remote().clone()));
         }
     }
 }
@@ -54,35 +108,6 @@ impl Handler {
         Ok(())
     }
 
-    async fn forward_telnet_to_client(
-        addr: SocketAddr,
-        telnet: Arc<async_telnet::Telnet>,
-        mut handle: Handle,
-        channel: ChannelId,
-    ) {
-        loop {
-            match telnet.read().await {
-                Ok(TelnetEvent::Data(data)) => {
-                    if let Err(e) = handle.data(channel, data.to_vec().into()).await {
-                        debug!("[client {}] failed sending to client: {:?}", addr, e);
-                        break;
-                    }
-                }
-                Ok(TelnetEvent::Error(msg)) => {
-                    debug!("[client {}] upstream telnet error: {}", addr, msg);
-                    break;
-                }
-                Ok(event) => debug!("[client {}] upstream telnet event: {:?}", addr, event),
-                Err(err) => {
-                    debug!("[client {}] upstream read error: {:?}", addr, err);
-                    break;
-                }
-            }
-        }
-        let _ = handle.eof(channel).await;
-        let _ = handle.close(channel).await;
-    }
-
     async fn start_conn(
         mut self,
         session: Session,
@@ -96,13 +121,13 @@ impl Handler {
         };
         Self::send_to_conn(&conn, conn_data.serialize().unwrap()).await?;
 
-        let telnet = Arc::new(async_telnet::Telnet::new(conn, 1024));
-        self.telnet = Some(telnet.clone());
-        tokio::spawn(Self::forward_telnet_to_client(
-            self.addr,
-            telnet.clone(),
-            session.handle(),
-            channel,
+        let (read_half, write_half) = conn.into_split();
+
+        self.telnet = Some(telnet::Telnet::new(1024));
+        tokio::spawn(self.telnet.as_mut().unwrap().run_stream(
+            read_half,
+            write_half,
+            TelnetHandler::new(session.handle(), channel),
         ));
 
         Ok((self, session))
@@ -121,25 +146,35 @@ impl Handler {
             neg[..2].copy_from_slice(&cols.to_be_bytes());
             neg[2..].copy_from_slice(&rows.to_be_bytes());
             telnet
-                .subnegotiate(telnet::TelnetOption::NAWS, &neg)
+                .remote()
+                .subnegotiate(telnet::NAWS, neg.into())
                 .await?
         }
         Ok((self, session))
     }
 
-    async fn send_client_data(self, session: Session) -> Result<(Self, Session), thrussh::Error> {
-        if let Some(telnet) = &self.telnet {
-            telnet.flush_write().await?;
+    async fn send_data(
+        self,
+        session: Session,
+        remote: telnet::Remote,
+        data: Vec<u8>,
+    ) -> Result<(Self, Session), thrussh::Error> {
+        match remote.data(data).await {
+            Ok(_) => Ok((self, session)),
+            Err(e) => Err(e.into()),
         }
-        Ok((self, session))
     }
 
     async fn client_eof(self, session: Session) -> Result<(Self, Session), thrussh::Error> {
         debug!("[client {}] client eof", self.addr);
         if let Some(telnet) = &self.telnet {
-            telnet.shutdown_write();
+            telnet.remote().shutdown_write().await?;
         }
         Ok((self, session))
+    }
+
+    async fn upstream_shutdown_write(remote: telnet::Remote) -> io::Result<()> {
+        remote.shutdown_write().await
     }
 
     fn check_channel(&self, channel: ChannelId) -> bool {
@@ -276,12 +311,11 @@ impl server::Handler for Handler {
         if !self.check_channel(channel) {
             return Self::wrong_channel();
         }
-        match &self.telnet {
-            Some(telnet) => match telnet.write(data) {
-                Ok(_) => self.send_client_data(session).boxed(),
-                Err(e) => future::ready(Err(e.into())).boxed(),
-            },
-            None => self.finished(session),
+        if let Some(telnet) = &self.telnet {
+            let remote = telnet.remote().clone();
+            self.send_data(session, remote, data.into()).boxed()
+        } else {
+            self.finished(session)
         }
     }
 

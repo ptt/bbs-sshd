@@ -44,7 +44,6 @@ dependencies = [
  "libc",
  "log",
  "socket2",
- "telnet",
  "thrussh",
  "thrussh-keys",
  "tokio",
@@ -579,10 +578,6 @@ dependencies = [
  "quote",
  "unicode-xid",
 ]
-
-[[package]]
-name = "telnet"
-version = "0.1.4"
 
 [[package]]
 name = "termcolor"
