@@ -60,6 +60,11 @@ impl telnet::Handler for TelnetHandler {
         self.unit(remote)
     }
 
+    fn subnegotiation(self, remote: telnet::Remote, data: &[u8]) -> Self::FutureUnit {
+        debug!("telnet subnegotiation data {:?}", data);
+        self.unit(remote)
+    }
+
     fn data(self, remote: telnet::Remote, data: &[u8]) -> Self::FutureUnit {
         self.send_data(remote, data.to_vec().into()).boxed()
     }
@@ -124,11 +129,11 @@ impl Handler {
         let (read_half, write_half) = conn.into_split();
 
         self.telnet = Some(telnet::Telnet::new(1024));
-        tokio::spawn(self.telnet.as_mut().unwrap().run_stream(
+        self.telnet.as_mut().unwrap().start(
             read_half,
             write_half,
             TelnetHandler::new(session.handle(), channel),
-        ));
+        );
 
         Ok((self, session))
     }
@@ -147,7 +152,7 @@ impl Handler {
             neg[2..].copy_from_slice(&rows.to_be_bytes());
             telnet
                 .remote()
-                .subnegotiate(telnet::NAWS, neg.into())
+                .subnegotiate(telnet::byte::NAWS, neg.into())
                 .await?
         }
         Ok((self, session))
