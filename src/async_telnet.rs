@@ -109,6 +109,7 @@ impl Telnet {
         self.write_half.lock().unwrap().take();
     }
 
+    #[allow(dead_code)]
     pub async fn negotiate(&self, action: NegotiationAction, opt: TelnetOption) -> Result<()> {
         self.telnet.lock().unwrap().negotiate(action, opt);
         self.flush_write().await?;
