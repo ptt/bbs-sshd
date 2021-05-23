@@ -1,7 +1,7 @@
 use crate::logind;
 use crate::telnet;
 use futures::FutureExt;
-use log::{debug, warn};
+use log::{debug, info, warn};
 use std::borrow::Cow;
 use std::cmp;
 use std::future;
@@ -246,6 +246,7 @@ impl server::Handler for Handler {
                 },
             )))
         } else {
+            info!("Rejected auth from {} with user {}", self.addr, user);
             future::ready(Ok((self, Auth::Reject)))
         }
     }
@@ -264,6 +265,11 @@ impl server::Handler for Handler {
             self.finished(session)
         } else {
             debug!("[client {}] channel_open_session: opened", self.addr);
+            info!(
+                "Session opened for {}, encoding {}",
+                self.addr,
+                logind::encoding_name(self.encoding)
+            );
             session.channel_success(channel);
             self.channel = Some(channel);
             self.start_conn(session, channel).boxed()
