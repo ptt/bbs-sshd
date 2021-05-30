@@ -13,9 +13,10 @@ futures = "0.3.15"
 thrussh = { path = "/home/robert/thrussh/thrussh" }
 thrussh-keys = { path = "/home/robert/thrussh/thrussh-keys" }
 tokio = { version = "1.6.0", features = ["signal", "time"] }
-env_logger = "0.8.3"
+#env_logger = "0.8.3"
 libc = "0.2.94"
 socket2 = { version = "0.4.0", features = ["all"] }
 log = { version = "0.4.14", features = ["release_max_level_trace"] }
 openssl = "0.10.34"
 ssh-keys = "0.1.4"
+syslog = "5.0.0"
