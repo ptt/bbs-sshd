@@ -141,6 +141,14 @@ fn main() {
     )
     .expect("failed to parse config file");
 
+    let sshcfg = make_ssh_config(&cfg);
+    let listeners = bind_ports(&cfg);
+
+    drop_privileges(&cfg);
+    if !matches.is_present("no_daemon") {
+        daemonize();
+    }
+
     let logger = syslog::unix(Formatter3164 {
         facility: Facility::LOG_LOCAL0,
         hostname: None,
@@ -150,14 +158,6 @@ fn main() {
     .expect("unable to start logging");
     log::set_boxed_logger(Box::new(Logger::new(logger))).unwrap();
     log::set_max_level(log::LevelFilter::Info);
-
-    let sshcfg = make_ssh_config(&cfg);
-    let listeners = bind_ports(&cfg);
-
-    drop_privileges(&cfg);
-    if !matches.is_present("no_daemon") {
-        daemonize();
-    }
 
     tokio::runtime::Builder::new_current_thread()
         .enable_all()
