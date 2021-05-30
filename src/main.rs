@@ -15,6 +15,9 @@ use syslog::{Facility, Formatter3164, LoggerBackend};
 use tokio::signal::unix::{signal, SignalKind};
 use tokio::sync::mpsc;
 
+const FLAG_NO_DEAMON: &str = "no_daemon";
+const FLAG_CONFIG_FILE: &str = "config_file";
+
 struct Logger {
     under: Arc<Mutex<syslog::Logger<LoggerBackend, Formatter3164>>>,
 }
@@ -122,7 +125,7 @@ fn main() {
         .author(clap::crate_authors!())
         .about("Specialized SSH daemon to bridge ssh client to logind.")
         .arg(
-            Arg::with_name("config_file")
+            Arg::with_name(FLAG_CONFIG_FILE)
                 .short("f")
                 .help("Config file path")
                 .takes_value(true)
@@ -130,7 +133,7 @@ fn main() {
                 .required(true),
         )
         .arg(
-            Arg::with_name("no_daemon")
+            Arg::with_name(FLAG_NO_DEAMON)
                 .short("D")
                 .help("Do not daemonize; PID file will not be written"),
         )
@@ -142,7 +145,7 @@ fn main() {
         .get_matches();
 
     let cfg: config::Config = toml::from_str(
-        &std::fs::read_to_string(matches.value_of("config_file").unwrap())
+        &std::fs::read_to_string(matches.value_of(FLAG_CONFIG_FILE).unwrap())
             .expect("failed to read config file"),
     )
     .expect("failed to parse config file");
@@ -151,7 +154,7 @@ fn main() {
     let listeners = bind_ports(&cfg);
 
     drop_privileges(&cfg);
-    if !matches.is_present("no_daemon") {
+    if !matches.is_present(FLAG_NO_DEAMON) {
         daemonize();
         write_pid_file(&cfg);
     }
