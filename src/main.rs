@@ -19,13 +19,15 @@ const FLAG_NO_DEAMON: &str = "no_daemon";
 const FLAG_CONFIG_FILE: &str = "config_file";
 
 struct Logger {
-    under: Arc<Mutex<syslog::Logger<LoggerBackend, Formatter3164>>>,
+    under: Mutex<syslog::Logger<LoggerBackend, Formatter3164>>,
+    also_stderr: bool,
 }
 
 impl Logger {
-    fn new(under: syslog::Logger<LoggerBackend, Formatter3164>) -> Self {
+    fn new(under: syslog::Logger<LoggerBackend, Formatter3164>, also_stderr: bool) -> Self {
         Logger {
-            under: Arc::new(Mutex::new(under)),
+            under: Mutex::new(under),
+            also_stderr,
         }
     }
 }
@@ -39,6 +41,9 @@ impl log::Log for Logger {
         if self.enabled(record.metadata()) {
             let mut under = self.under.lock().unwrap();
             let message = format!("{} ({}) {}", record.level(), record.target(), record.args());
+            if self.also_stderr {
+                eprintln!("{} {}", time::now().strftime("%b %d %T").unwrap(), message);
+            }
             let _ = match record.level() {
                 log::Level::Error => under.err(message),
                 log::Level::Warn => under.warning(message),
@@ -154,7 +159,8 @@ fn main() {
     let listeners = bind_ports(&cfg);
 
     drop_privileges(&cfg);
-    if !matches.is_present(FLAG_NO_DEAMON) {
+    let foreground = matches.is_present(FLAG_NO_DEAMON);
+    if !foreground {
         daemonize();
         write_pid_file(&cfg);
     }
@@ -166,7 +172,7 @@ fn main() {
         pid: std::process::id() as i32,
     })
     .expect("unable to start logging");
-    log::set_boxed_logger(Box::new(Logger::new(logger))).unwrap();
+    log::set_boxed_logger(Box::new(Logger::new(logger, foreground))).unwrap();
     log::set_max_level(cfg.log_level.unwrap_or(log::LevelFilter::Info));
 
     match cfg.workers.unwrap_or(0) {
