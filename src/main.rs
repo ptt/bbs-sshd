@@ -1,4 +1,5 @@
 #![feature(destructuring_assignment)]
+mod config;
 mod handler;
 mod host_keys;
 mod logind;
@@ -12,6 +13,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use syslog::{Facility, Formatter3164, LoggerBackend};
 use tokio::signal::unix::{signal, SignalKind};
+use tokio::sync::mpsc;
 
 struct Logger {
     under: Arc<Mutex<syslog::Logger<LoggerBackend, Formatter3164>>>,
@@ -59,10 +61,53 @@ fn daemonize() {
     }
 }
 
-fn drop_privileges() {
+fn drop_privileges(cfg: &config::Config) {
     use nix::unistd::{setgid, setuid, Gid, Uid};
-    setgid(Gid::from_raw(99)).expect("failed to set gid");
-    setuid(Uid::from_raw(9999)).expect("failed to set uid");
+    if let Some(gid) = cfg.gid {
+        setgid(Gid::from_raw(gid)).expect("failed to set gid");
+    }
+    if let Some(uid) = cfg.uid {
+        setuid(Uid::from_raw(uid)).expect("failed to set uid");
+    }
+}
+
+fn make_ssh_config(cfg: &config::Config) -> thrussh::server::Config {
+    let mut sshcfg = thrussh::server::Config::default();
+    sshcfg.server_id = "SSH-2.0-bbs-sshd".to_string();
+    sshcfg.auth_rejection_time = Duration::ZERO;
+    sshcfg.connection_timeout = None;
+
+    let mut key_algos = Vec::new();
+    for path in &cfg.host_keys {
+        let pem = std::fs::read_to_string(path).expect("failed to read key");
+        host_keys::convert_key(&pem, &mut sshcfg.keys, &mut key_algos)
+            .expect("failed to parse key");
+    }
+    sshcfg.preferred.key = key_algos.leak();
+
+    // Per RFC 4252 Sec. 7, "publickey" method is required. However, we are not going to accept it.
+    // "keyboard-interactive" is used for printing out error messages about bad user names.
+    sshcfg.methods = thrussh::MethodSet::PUBLICKEY | thrussh::MethodSet::KEYBOARD_INTERACTIVE;
+    if false {
+        // debug rekey
+        sshcfg.limits.rekey_time_limit = Duration::from_secs(10);
+        sshcfg.limits.rekey_write_limit = 16384;
+    }
+
+    sshcfg
+}
+
+fn bind_ports(cfg: &config::Config) -> Vec<std::net::TcpListener> {
+    cfg.bind
+        .iter()
+        .map(|addr| {
+            socket_linux::new_listener(
+                SocketAddr::from_str(addr).expect("unable to parse bind address"),
+                10,
+            )
+            .expect("unable to create listener socket")
+        })
+        .collect()
 }
 
 fn main() {
@@ -70,6 +115,14 @@ fn main() {
         .version(clap::crate_version!())
         .author(clap::crate_authors!())
         .about("Specialized SSH daemon to bridge ssh client to logind.")
+        .arg(
+            Arg::with_name("config_file")
+                .short("f")
+                .help("Config file path")
+                .takes_value(true)
+                .value_name("FILE")
+                .required(true),
+        )
         .arg(
             Arg::with_name("no_daemon")
                 .short("D")
@@ -82,6 +135,12 @@ fn main() {
         )
         .get_matches();
 
+    let cfg: config::Config = toml::from_str(
+        &std::fs::read_to_string(matches.value_of("config_file").unwrap())
+            .expect("failed to read config file"),
+    )
+    .expect("failed to parse config file");
+
     let logger = syslog::unix(Formatter3164 {
         facility: Facility::LOG_LOCAL0,
         hostname: None,
@@ -92,38 +151,10 @@ fn main() {
     log::set_boxed_logger(Box::new(Logger::new(logger))).unwrap();
     log::set_max_level(log::LevelFilter::Info);
 
-    let mut config = thrussh::server::Config::default();
-    config.server_id = "SSH-2.0-bbs-sshd".to_string();
-    config.auth_rejection_time = Duration::ZERO;
-    config.connection_timeout = None;
+    let sshcfg = make_ssh_config(&cfg);
+    let listeners = bind_ports(&cfg);
 
-    let mut key_algos = Vec::new();
-    for path in [
-        "/home/robert/ssh_host_key_ed25519",
-        "/home/robert/ssh_host_key_rsa",
-    ] {
-        let pem = std::fs::read_to_string(path).expect("failed to read key");
-        host_keys::convert_key(&pem, &mut config.keys, &mut key_algos)
-            .expect("failed to parse key");
-    }
-    config.preferred.key = key_algos.leak();
-
-    // Per RFC 4252 Sec. 7, "publickey" method is required. However, we are not going to accept it.
-    // "keyboard-interactive" is used for printing out error messages about bad user names.
-    config.methods = thrussh::MethodSet::PUBLICKEY | thrussh::MethodSet::KEYBOARD_INTERACTIVE;
-    if false {
-        // debug rekey
-        config.limits.rekey_time_limit = Duration::from_secs(10);
-        config.limits.rekey_write_limit = 16384;
-    }
-
-    let listener = socket_linux::new_listener(
-        SocketAddr::from_str("0.0.0.0:2222").expect("unable to parse bind address"),
-        10,
-    )
-    .expect("unable to create listener socket");
-
-    drop_privileges();
+    drop_privileges(&cfg);
     if !matches.is_present("no_daemon") {
         daemonize();
     }
@@ -132,18 +163,38 @@ fn main() {
         .enable_all()
         .build()
         .unwrap()
-        .block_on(async move { run(config, listener).await })
+        .block_on(async move { run(sshcfg, listeners).await })
 }
 
-async fn run(config: thrussh::server::Config, listener: std::net::TcpListener) {
+async fn run(config: thrussh::server::Config, listeners: Vec<std::net::TcpListener>) {
+    let (tx, mut rx) = mpsc::channel(1);
+    let config = Arc::new(config);
+
+    let servers: Vec<_> = listeners
+        .into_iter()
+        .map(move |listener| tokio::spawn(run_one_server(config.clone(), listener, tx.clone())))
+        .collect();
+
+    for handle in servers.into_iter() {
+        let _ = handle.await;
+    }
+    info!("Signal caught, draining clients");
+    let _ = rx.recv().await;
+    info!("bbs-sshd stopped");
+}
+
+async fn run_one_server(
+    config: Arc<thrussh::server::Config>,
+    listener: std::net::TcpListener,
+    alive: mpsc::Sender<()>,
+) {
+    let _ = alive;
     let listener = tokio::net::TcpListener::from_std(listener)
         .expect("unable to convert TcpListener into tokio");
-    let config = Arc::new(config);
 
     let mut sigint = signal(SignalKind::interrupt()).unwrap();
     let mut sigterm = signal(SignalKind::terminate()).unwrap();
 
-    let mut client_handles = Vec::new();
     loop {
         tokio::select! {
             biased;
@@ -155,18 +206,23 @@ async fn run(config: thrussh::server::Config, listener: std::net::TcpListener) {
                 let stream =
                     socket_linux::set_client_conn_options(stream)
                     .expect("unable to set socket options");
-                client_handles.push(tokio::spawn(thrussh::server::run_stream(
+                tokio::spawn(run_forward(
                     config.clone(),
                     stream,
                     handler::Handler::new(client_addr),
-                )));
+                    alive.clone(),
+                ));
             }
         }
     }
-    std::mem::drop(listener);
-    info!("Signal caught, draining clients");
-    for handle in client_handles.into_iter() {
-        let _ = handle.await;
-    }
-    info!("bbs-sshd stopped");
+}
+
+async fn run_forward(
+    config: Arc<thrussh::server::Config>,
+    stream: tokio::net::TcpStream,
+    handler: handler::Handler,
+    alive: mpsc::Sender<()>,
+) {
+    let _ = alive;
+    let _ = thrussh::server::run_stream(config.clone(), stream, handler).await;
 }
