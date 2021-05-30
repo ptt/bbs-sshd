@@ -186,6 +186,7 @@ async fn run(config: thrussh::server::Config, listeners: Vec<std::net::TcpListen
     let (tx, mut rx) = mpsc::channel(1);
     let config = Arc::new(config);
 
+    proctitle::set_title("bbs-sshd: run");
     let servers: Vec<_> = listeners
         .into_iter()
         .map(move |listener| tokio::spawn(run_one_server(config.clone(), listener, tx.clone())))
@@ -195,6 +196,7 @@ async fn run(config: thrussh::server::Config, listeners: Vec<std::net::TcpListen
         let _ = handle.await;
     }
     info!("Signal caught, draining clients");
+    proctitle::set_title("bbs-sshd: drain");
     let _ = rx.recv().await;
     info!("bbs-sshd stopped");
 }
