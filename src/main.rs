@@ -159,11 +159,17 @@ fn main() {
     log::set_boxed_logger(Box::new(Logger::new(logger))).unwrap();
     log::set_max_level(log::LevelFilter::Info);
 
-    tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .unwrap()
-        .block_on(async move { run(sshcfg, listeners).await })
+    match cfg.workers.unwrap_or(0) {
+        0 => tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build(),
+        n => tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .worker_threads(n)
+            .build(),
+    }
+    .unwrap()
+    .block_on(async move { run(sshcfg, listeners).await });
 }
 
 async fn run(config: thrussh::server::Config, listeners: Vec<std::net::TcpListener>) {
