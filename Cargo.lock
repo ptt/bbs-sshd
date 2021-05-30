@@ -415,9 +415,9 @@ dependencies = [
 
 [[package]]
 name = "num-bigint"
-version = "0.2.6"
+version = "0.4.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "090c7f9998ee0ff65aa5b723e4009f7b217707f1fb5ea551329cc4d6231fb304"
+checksum = "4e0d047c1062aa51e256408c560894e5251f08925980e53cf1aa5bd00eec6512"
 dependencies = [
  "autocfg",
  "num-integer",
@@ -678,7 +678,7 @@ dependencies = [
 
 [[package]]
 name = "thrussh"
-version = "0.32.9"
+version = "0.32.10"
 dependencies = [
  "bitflags",
  "byteorder",
@@ -695,7 +695,7 @@ dependencies = [
 
 [[package]]
 name = "thrussh-keys"
-version = "0.20.4"
+version = "0.20.6"
 dependencies = [
  "bit-vec",
  "byteorder",
@@ -837,9 +837,9 @@ checksum = "712e227841d057c1ee1cd2fb22fa7e5a5461ae8e48fa2ca79ec42cfc1931183f"
 
 [[package]]
 name = "yasna"
-version = "0.3.2"
+version = "0.4.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0de7bff972b4f2a06c85f6d8454b09df153af7e3a4ec2aac81db1b105b684ddb"
+checksum = "e262a29d0e61ccf2b6190d7050d4b237535fc76ce4c1210d9caa316f71dffa75"
 dependencies = [
  "bit-vec",
  "num-bigint",
