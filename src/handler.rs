@@ -1,7 +1,7 @@
 use crate::logind;
 use crate::telnet;
 use futures::FutureExt;
-use log::{debug, info, warn};
+use log::{debug, info, trace, warn};
 use std::borrow::Cow;
 use std::cmp;
 use std::future;
@@ -34,7 +34,7 @@ impl TelnetHandler {
         match self.ssh.data(self.channel, data).await {
             Ok(_) => Ok((self, remote)),
             Err(e) => {
-                debug!("send_data: error {:?}", e);
+                trace!("send_data: error {:?}", e);
                 Err(io::Error::from(io::ErrorKind::ConnectionReset))
             }
         }
@@ -56,12 +56,12 @@ impl telnet::Handler for TelnetHandler {
     }
 
     fn command(self, remote: telnet::Remote, cmd: u8, opt: Option<u8>) -> Self::FutureUnit {
-        debug!("telnet command {} opt {:?}", cmd, opt);
+        trace!("telnet command {} opt {:?}", cmd, opt);
         self.unit(remote)
     }
 
     fn subnegotiation(self, remote: telnet::Remote, data: &[u8]) -> Self::FutureUnit {
-        debug!("telnet subnegotiation data {:?}", data);
+        trace!("telnet subnegotiation data {:?}", data);
         self.unit(remote)
     }
 

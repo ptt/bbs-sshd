@@ -1,6 +1,6 @@
 use super::byte::{IAC, SB, SE};
 use super::{Handler, Remote};
-use log::{debug, trace};
+use log::trace;
 use std::io;
 use std::io::Result;
 use std::ops::Range;
@@ -92,7 +92,7 @@ impl Processor {
         mut remote: Remote,
     ) -> Result<(H, Remote)> {
         if data.len() == 0 {
-            debug!("process: eof");
+            trace!("process: eof");
             if self.state != State::Normal {
                 return Err(io::Error::from(io::ErrorKind::ConnectionReset));
             } else {

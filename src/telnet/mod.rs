@@ -2,7 +2,7 @@ pub mod byte;
 mod process;
 use byte::{IAC, SB, SE};
 use futures::Future;
-use log::debug;
+use log::{debug, trace};
 use process::Processor;
 use std::io;
 use std::io::{IoSlice, Result};
@@ -49,7 +49,7 @@ pub struct Remote {
 
 impl Remote {
     pub async fn data(&self, data: Vec<u8>) -> Result<()> {
-        debug!("Remote: data: {} bytes", data.len());
+        trace!("Remote: data: {} bytes", data.len());
         self.sender
             .send(Action::Data(data))
             .await
@@ -57,7 +57,7 @@ impl Remote {
     }
 
     pub async fn subnegotiate(&self, cmd: u8, data: Vec<u8>) -> Result<()> {
-        debug!("Remote: subnegotiate: cmd {} data {:?}", cmd, data);
+        trace!("Remote: subnegotiate: cmd {} data {:?}", cmd, data);
         self.sender
             .send(Action::Subnegotiate(cmd, data))
             .await
