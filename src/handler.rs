@@ -80,6 +80,7 @@ pub(crate) struct Handler {
     lport: u16,
     telnet: Option<telnet::Telnet>,
     channel: Option<ChannelId>,
+    auth_attempts: u16,
 }
 
 impl Drop for Handler {
@@ -99,6 +100,7 @@ impl Handler {
             lport,
             telnet: None,
             channel: None,
+            auth_attempts: 0,
         }
     }
 
@@ -192,6 +194,15 @@ impl Handler {
     fn wrong_channel() -> <Self as server::Handler>::FutureUnit {
         future::ready(Err(thrussh::Error::WrongChannel)).boxed()
     }
+
+    fn auth_reject(mut self) -> <Self as server::Handler>::FutureAuth {
+        self.auth_attempts += 1;
+        if self.auth_attempts < 5 {
+            future::ready(Ok((self, Auth::Reject)))
+        } else {
+            future::ready(Err(thrussh::Error::Disconnect))
+        }
+    }
 }
 
 impl server::Handler for Handler {
@@ -218,7 +229,7 @@ impl server::Handler for Handler {
         match user {
             "bbs" => self.encoding = logind::ConnData::CONV_NORMAL,
             "bbsu" => self.encoding = logind::ConnData::CONV_UTF8,
-            _ => return future::ready(Ok((self, Auth::Reject))),
+            _ => return self.auth_reject(),
         }
         future::ready(Ok((self, Auth::Accept)))
     }
@@ -250,7 +261,7 @@ impl server::Handler for Handler {
             )))
         } else {
             info!("Rejected auth from {} with user {}", self.addr, user);
-            future::ready(Ok((self, Auth::Reject)))
+            self.auth_reject()
         }
     }
 
