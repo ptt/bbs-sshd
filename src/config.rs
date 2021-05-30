@@ -1,3 +1,4 @@
+use log::LevelFilter;
 use serde_derive::Deserialize;
 
 #[derive(Deserialize)]
@@ -8,4 +9,5 @@ pub(crate) struct Config {
     pub gid: Option<u32>,
     pub workers: Option<usize>,
     pub pid_file: Option<String>,
+    pub log_level: Option<LevelFilter>,
 }

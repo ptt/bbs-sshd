@@ -164,7 +164,7 @@ fn main() {
     })
     .expect("unable to start logging");
     log::set_boxed_logger(Box::new(Logger::new(logger))).unwrap();
-    log::set_max_level(log::LevelFilter::Info);
+    log::set_max_level(cfg.log_level.unwrap_or(log::LevelFilter::Info));
 
     match cfg.workers.unwrap_or(0) {
         0 => tokio::runtime::Builder::new_current_thread()
