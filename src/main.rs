@@ -118,4 +118,5 @@ async fn main() {
     for handle in client_handles.into_iter() {
         let _ = handle.await;
     }
+    info!("bbs-sshd stopped");
 }
