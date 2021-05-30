@@ -4,6 +4,7 @@ mod host_keys;
 mod logind;
 mod socket_linux;
 mod telnet;
+use clap::{App, Arg};
 use log::{error, info};
 use std::net::SocketAddr;
 use std::str::FromStr;
@@ -65,6 +66,22 @@ fn drop_privileges() {
 }
 
 fn main() {
+    let matches = App::new("BBS SSH Daemon")
+        .version(clap::crate_version!())
+        .author(clap::crate_authors!())
+        .about("Specialized SSH daemon to bridge ssh client to logind.")
+        .arg(
+            Arg::with_name("no_daemon")
+                .short("D")
+                .help("Do not daemonize; PID file will not be written"),
+        )
+        .after_help(
+            "SIGNALS:\n\
+            \x20   SIGINT, SIGTERM - Graceful shutdown.\n\
+            \x20       Stop listening and wait all clients to disconnect",
+        )
+        .get_matches();
+
     let logger = syslog::unix(Formatter3164 {
         facility: Facility::LOG_LOCAL0,
         hostname: None,
@@ -107,7 +124,9 @@ fn main() {
     .expect("unable to create listener socket");
 
     drop_privileges();
-    daemonize();
+    if !matches.is_present("no_daemon") {
+        daemonize();
+    }
 
     tokio::runtime::Builder::new_current_thread()
         .enable_all()
