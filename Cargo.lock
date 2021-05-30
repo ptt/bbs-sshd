@@ -29,9 +29,11 @@ name = "bbs-sshd"
 version = "0.1.0"
 dependencies = [
  "bytes",
+ "fork",
  "futures",
  "libc",
  "log",
+ "nix",
  "openssl",
  "socket2",
  "ssh-keys",
@@ -157,6 +159,15 @@ name = "foreign-types-shared"
 version = "0.1.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "00b0228411908ca8685dba7fc2cdd70ec9990a6e753e89b6ac91a84c40fbaf4b"
+
+[[package]]
+name = "fork"
+version = "0.1.18"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e4c5b9b0bce249a456f83ac4404e8baad0d2ba81cf651949719a4f74eb7323bb"
+dependencies = [
+ "libc",
+]
 
 [[package]]
 name = "futures"
@@ -340,6 +351,18 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b9f1c5b025cda876f66ef43a113f91ebc9f4ccef34843000e0adf6ebbab84e21"
 dependencies = [
  "winapi",
+]
+
+[[package]]
+name = "nix"
+version = "0.20.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "fa9b4819da1bc61c0ea48b63b7bc8604064dd43013e7cc325df098d49cd7c18a"
+dependencies = [
+ "bitflags",
+ "cc",
+ "cfg-if",
+ "libc",
 ]
 
 [[package]]

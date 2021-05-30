@@ -4,7 +4,7 @@ mod host_keys;
 mod logind;
 mod socket_linux;
 mod telnet;
-use log::info;
+use log::{error, info};
 use std::net::SocketAddr;
 use std::str::FromStr;
 use std::sync::{Arc, Mutex};
@@ -46,8 +46,25 @@ impl log::Log for Logger {
     fn flush(&self) {}
 }
 
-#[tokio::main]
-async fn main() {
+fn daemonize() {
+    // Closing fds is known to be problematic.
+    match fork::daemon(/* nochdir */ false, /* noclose */ true) {
+        Ok(fork::Fork::Child) => return,
+        Ok(fork::Fork::Parent(_)) => std::process::exit(0),
+        Err(e) => {
+            error!("Error daemonizing: {}", e);
+            std::process::exit(1);
+        }
+    }
+}
+
+fn drop_privileges() {
+    use nix::unistd::{setgid, setuid, Gid, Uid};
+    setgid(Gid::from_raw(99)).expect("failed to set gid");
+    setuid(Uid::from_raw(9999)).expect("failed to set uid");
+}
+
+fn main() {
     let logger = syslog::unix(Formatter3164 {
         facility: Facility::LOG_LOCAL0,
         hostname: None,
@@ -82,16 +99,30 @@ async fn main() {
         config.limits.rekey_time_limit = Duration::from_secs(10);
         config.limits.rekey_write_limit = 16384;
     }
-    let config = Arc::new(config);
-
-    let mut sigint = signal(SignalKind::interrupt()).unwrap();
-    let mut sigterm = signal(SignalKind::terminate()).unwrap();
 
     let listener = socket_linux::new_listener(
         SocketAddr::from_str("0.0.0.0:2222").expect("unable to parse bind address"),
         10,
     )
     .expect("unable to create listener socket");
+
+    drop_privileges();
+    daemonize();
+
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap()
+        .block_on(async move { run(config, listener).await })
+}
+
+async fn run(config: thrussh::server::Config, listener: std::net::TcpListener) {
+    let listener = tokio::net::TcpListener::from_std(listener)
+        .expect("unable to convert TcpListener into tokio");
+    let config = Arc::new(config);
+
+    let mut sigint = signal(SignalKind::interrupt()).unwrap();
+    let mut sigterm = signal(SignalKind::terminate()).unwrap();
 
     let mut client_handles = Vec::new();
     loop {
