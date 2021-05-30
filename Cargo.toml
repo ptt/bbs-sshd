@@ -17,3 +17,5 @@ env_logger = "0.8.3"
 libc = "0.2.94"
 socket2 = { version = "0.4.0", features = ["all"] }
 log = "0.4.14"
+openssl = "0.10.34"
+ssh-keys = "0.1.4"

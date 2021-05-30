@@ -1,5 +1,6 @@
 #![feature(destructuring_assignment)]
 mod handler;
+mod host_keys;
 mod logind;
 mod socket_linux;
 mod telnet;
@@ -13,13 +14,23 @@ use tokio::signal::unix::{signal, SignalKind};
 #[tokio::main]
 async fn main() {
     env_logger::init();
+
     let mut config = thrussh::server::Config::default();
     config.server_id = "SSH-2.0-bbs-sshd".to_string();
     config.auth_rejection_time = Duration::ZERO;
     config.connection_timeout = None;
-    config
-        .keys
-        .push(thrussh_keys::key::KeyPair::generate_ed25519().unwrap());
+
+    let mut key_algos = Vec::new();
+    for path in [
+        "/home/robert/ssh_host_key_ed25519",
+        "/home/robert/ssh_host_key_rsa",
+    ] {
+        let pem = std::fs::read_to_string(path).expect("failed to read key");
+        host_keys::convert_key(&pem, &mut config.keys, &mut key_algos)
+            .expect("failed to parse key");
+    }
+    config.preferred.key = key_algos.leak();
+
     // Per RFC 4252 Sec. 7, "publickey" method is required. However, we are not going to accept it.
     // "keyboard-interactive" is used for printing out error messages about bad user names.
     config.methods = thrussh::MethodSet::PUBLICKEY | thrussh::MethodSet::KEYBOARD_INTERACTIVE;
