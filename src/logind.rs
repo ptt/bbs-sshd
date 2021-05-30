@@ -4,6 +4,7 @@ use std::net::SocketAddr;
 pub struct ConnData {
     pub addr: SocketAddr,
     pub encoding: u32,
+    pub lport: u16,
 }
 
 impl ConnData {
@@ -38,7 +39,7 @@ impl ConnData {
             }
         };
         conn_data.put_u16_le(self.addr.port());
-        conn_data.put_u16_le(0); // lport
+        conn_data.put_u16_le(self.lport);
         conn_data.put_u32_le(0); // flags
         assert_eq!(36, conn_data.len());
         Some(conn_data.to_vec())

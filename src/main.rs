@@ -209,6 +209,13 @@ async fn run_one_server(
     let _ = alive;
     let listener = tokio::net::TcpListener::from_std(listener)
         .expect("unable to convert TcpListener into tokio");
+    let lport = match listener
+        .local_addr()
+        .expect("unable to retrieve local address")
+    {
+        SocketAddr::V4(v4) => v4.port(),
+        SocketAddr::V6(v6) => v6.port(),
+    };
 
     let mut sigint = signal(SignalKind::interrupt()).unwrap();
     let mut sigterm = signal(SignalKind::terminate()).unwrap();
@@ -227,7 +234,7 @@ async fn run_one_server(
                 tokio::spawn(run_forward(
                     config.clone(),
                     stream,
-                    handler::Handler::new(client_addr),
+                    handler::Handler::new(client_addr, lport),
                     alive.clone(),
                 ));
             }

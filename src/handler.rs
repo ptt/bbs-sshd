@@ -77,6 +77,7 @@ impl telnet::Handler for TelnetHandler {
 pub(crate) struct Handler {
     addr: SocketAddr,
     encoding: u32,
+    lport: u16,
     telnet: Option<telnet::Telnet>,
     channel: Option<ChannelId>,
 }
@@ -91,10 +92,11 @@ impl Drop for Handler {
 }
 
 impl Handler {
-    pub fn new(client_addr: SocketAddr) -> Self {
+    pub fn new(client_addr: SocketAddr, lport: u16) -> Self {
         Handler {
             addr: client_addr,
             encoding: logind::ConnData::CONV_NORMAL,
+            lport,
             telnet: None,
             channel: None,
         }
@@ -123,6 +125,7 @@ impl Handler {
         let conn_data = logind::ConnData {
             addr: self.addr,
             encoding: self.encoding,
+            lport: self.lport,
         };
         Self::send_to_conn(&conn, conn_data.serialize().unwrap()).await?;
 
