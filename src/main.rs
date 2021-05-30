@@ -61,6 +61,12 @@ fn daemonize() {
     }
 }
 
+fn write_pid_file(cfg: &config::Config) {
+    if let Some(pid_file) = &cfg.pid_file {
+        std::fs::write(pid_file, std::process::id().to_string()).expect("failed to write pid file");
+    }
+}
+
 fn drop_privileges(cfg: &config::Config) {
     use nix::unistd::{setgid, setuid, Gid, Uid};
     if let Some(gid) = cfg.gid {
@@ -147,6 +153,7 @@ fn main() {
     drop_privileges(&cfg);
     if !matches.is_present("no_daemon") {
         daemonize();
+        write_pid_file(&cfg);
     }
 
     let logger = syslog::unix(Formatter3164 {

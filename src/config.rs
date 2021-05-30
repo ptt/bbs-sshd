@@ -7,4 +7,5 @@ pub(crate) struct Config {
     pub uid: Option<u32>,
     pub gid: Option<u32>,
     pub workers: Option<usize>,
+    pub pid_file: Option<String>,
 }
