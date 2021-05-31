@@ -107,9 +107,24 @@ impl Named for KeyPair {
 pub trait Select {
     fn select<S: AsRef<str> + Copy>(a: &[S], b: &[u8]) -> Option<(bool, S)>;
 
+    fn log_unsupported_algos(kex: &[u8], key: &[u8], cipher: &[u8], mac: &[u8]) {
+        warn!(
+            "unsupported client algos: kex \"{}\" key \"{}\" cipher \"{}\" mac \"{}\"",
+            String::from_utf8_lossy(kex),
+            String::from_utf8_lossy(key),
+            String::from_utf8_lossy(cipher),
+            String::from_utf8_lossy(mac)
+        );
+    }
+
     fn read_kex(buffer: &[u8], pref: &Preferred) -> Result<Names, Error> {
         let mut r = buffer.reader(17);
         let kex_string = r.read_string()?;
+        let key_string = r.read_string()?;
+        let cipher_string = r.read_string()?;
+        r.read_string()?; // cipher server-to-client.
+        let mac_string = r.read_string()?;
+
         let (kex_both_first, kex_algorithm) = if let Some(x) = Self::select(pref.kex, kex_string) {
             x
         } else {
@@ -118,10 +133,10 @@ pub trait Select {
                 from_utf8(kex_string),
                 pref.kex
             );
+            Self::log_unsupported_algos(kex_string, key_string, cipher_string, mac_string);
             return Err(Error::NoCommonKexAlgo.into());
         };
 
-        let key_string = r.read_string()?;
         let (key_both_first, key_algorithm) = if let Some(x) = Self::select(pref.key, key_string) {
             x
         } else {
@@ -130,10 +145,10 @@ pub trait Select {
                 from_utf8(key_string),
                 pref.key
             );
+            Self::log_unsupported_algos(kex_string, key_string, cipher_string, mac_string);
             return Err(Error::NoCommonKeyAlgo.into());
         };
 
-        let cipher_string = r.read_string()?;
         let cipher = Self::select(pref.cipher, cipher_string);
         if cipher.is_none() {
             debug!(
@@ -141,11 +156,11 @@ pub trait Select {
                 from_utf8(cipher_string),
                 pref.cipher
             );
+            Self::log_unsupported_algos(kex_string, key_string, cipher_string, mac_string);
             return Err(Error::NoCommonCipher.into());
         }
-        r.read_string()?; // cipher server-to-client.
         debug!("kex {}", line!());
-        let mac = Self::select(pref.mac, r.read_string()?);
+        let mac = Self::select(pref.mac, mac_string);
         let mac = mac.and_then(|(_, x)| Some(x));
         r.read_string()?; // mac server-to-client.
 
