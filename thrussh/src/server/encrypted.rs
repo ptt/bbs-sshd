@@ -244,6 +244,23 @@ impl Encrypted {
                     self.state = EncryptedState::InitCompression
                 }
                 Ok(())
+            } else if method == b"none" {
+                let auth_request = if let EncryptedState::WaitingAuthRequest(ref mut a) = self.state
+                {
+                    a
+                } else {
+                    unreachable!()
+                };
+                let h = handler.take().unwrap();
+                let (handler_, auth) = h.auth_none(user).await?;
+                *handler = Some(handler_);
+                if let Auth::Accept = auth {
+                    server_auth_request_success(&mut self.write);
+                    self.state = EncryptedState::InitCompression;
+                } else {
+                    reject_auth_request(until, &mut self.write, auth_request).await;
+                }
+                Ok(())
             } else {
                 // Other methods of the base specification are insecure or optional.
                 let auth_request = if let EncryptedState::WaitingAuthRequest(ref mut a) = self.state
