@@ -5,11 +5,14 @@ pub struct ConnData {
     pub addr: SocketAddr,
     pub encoding: u32,
     pub lport: u16,
+    pub flags: u32,
 }
 
 impl ConnData {
     pub const CONV_NORMAL: u32 = 0;
     pub const CONV_UTF8: u32 = 1;
+
+    pub const CONN_FLAG_SECURE: u32 = 1;
 
     pub fn serialize(&self) -> Option<Vec<u8>> {
         use bytes::BufMut;
@@ -40,7 +43,7 @@ impl ConnData {
         };
         conn_data.put_u16_le(self.addr.port());
         conn_data.put_u16_le(self.lport);
-        conn_data.put_u32_le(0); // flags
+        conn_data.put_u32_le(self.flags);
         assert_eq!(36, conn_data.len());
         Some(conn_data.to_vec())
     }

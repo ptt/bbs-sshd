@@ -132,6 +132,7 @@ impl Handler {
             addr: self.addr,
             encoding: self.encoding,
             lport: self.lport,
+            flags: logind::ConnData::CONN_FLAG_SECURE,
         };
         Self::send_to_conn(&conn, conn_data.serialize().unwrap()).await?;
 
