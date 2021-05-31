@@ -22,9 +22,10 @@ pub mod clear;
 
 pub struct Cipher {
     pub name: Name,
+    pub block_len: usize,
     pub key_len: usize,
-    pub make_opening_cipher: fn(key: &[u8]) -> OpeningCipher,
-    pub make_sealing_cipher: fn(key: &[u8]) -> SealingCipher,
+    pub make_opening_cipher: fn(key: &[u8], iv: &[u8]) -> OpeningCipher,
+    pub make_sealing_cipher: fn(key: &[u8], iv: &[u8]) -> SealingCipher,
 }
 
 pub enum OpeningCipher {
