@@ -99,6 +99,7 @@ fn make_ssh_config(cfg: &config::Config) -> thrussh::server::Config {
             .expect("failed to parse key");
     }
     sshcfg.preferred.key = key_algos.leak();
+    sshcfg.preferred.compression = &["none"];
 
     // Per RFC 4252 Sec. 7, "publickey" method is required. However, we are not going to accept it.
     // "keyboard-interactive" is used for printing out error messages about bad user names.
