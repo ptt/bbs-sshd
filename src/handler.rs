@@ -7,7 +7,9 @@ use std::cmp;
 use std::future;
 use std::io;
 use std::net::SocketAddr;
+use std::path::PathBuf;
 use std::pin::Pin;
+use std::sync::Arc;
 use thrussh::server;
 use thrussh::server::{Auth, Handle, Session};
 use thrussh::ChannelId;
@@ -78,6 +80,7 @@ pub(crate) struct Handler {
     addr: SocketAddr,
     encoding: u32,
     lport: u16,
+    logind_path: Arc<PathBuf>,
     telnet: Option<telnet::Telnet>,
     channel: Option<ChannelId>,
     auth_attempts: u16,
@@ -93,11 +96,12 @@ impl Drop for Handler {
 }
 
 impl Handler {
-    pub fn new(client_addr: SocketAddr, lport: u16) -> Self {
+    pub fn new(client_addr: SocketAddr, lport: u16, logind_path: Arc<PathBuf>) -> Self {
         Handler {
             addr: client_addr,
             encoding: logind::ConnData::CONV_NORMAL,
             lport,
+            logind_path,
             telnet: None,
             channel: None,
             auth_attempts: 0,
@@ -122,7 +126,7 @@ impl Handler {
         session: Session,
         channel: ChannelId,
     ) -> Result<(Self, Session), thrussh::Error> {
-        let conn = UnixStream::connect(&"/home/bbs/run/logind.connfwd.sock").await?;
+        let conn = UnixStream::connect(self.logind_path.as_ref()).await?;
 
         let conn_data = logind::ConnData {
             addr: self.addr,

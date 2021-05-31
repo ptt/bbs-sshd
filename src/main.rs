@@ -8,6 +8,7 @@ mod telnet;
 use clap::{App, Arg};
 use log::{error, info};
 use std::net::SocketAddr;
+use std::path::{Path, PathBuf};
 use std::str::FromStr;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -175,6 +176,8 @@ fn main() {
     log::set_boxed_logger(Box::new(Logger::new(logger, foreground))).unwrap();
     log::set_max_level(cfg.log_level.unwrap_or(log::LevelFilter::Info));
 
+    let logind_path = Arc::new(Path::new(&cfg.logind_path).to_path_buf());
+
     match cfg.workers.unwrap_or(0) {
         0 => tokio::runtime::Builder::new_current_thread()
             .enable_all()
@@ -185,17 +188,28 @@ fn main() {
             .build(),
     }
     .unwrap()
-    .block_on(async move { run(sshcfg, listeners).await });
+    .block_on(async move { run(sshcfg, listeners, logind_path).await });
 }
 
-async fn run(config: thrussh::server::Config, listeners: Vec<std::net::TcpListener>) {
+async fn run(
+    config: thrussh::server::Config,
+    listeners: Vec<std::net::TcpListener>,
+    logind_path: Arc<PathBuf>,
+) {
     let (tx, mut rx) = mpsc::channel(1);
     let config = Arc::new(config);
 
     proctitle::set_title("bbs-sshd: run");
     let servers: Vec<_> = listeners
         .into_iter()
-        .map(move |listener| tokio::spawn(run_one_server(config.clone(), listener, tx.clone())))
+        .map(move |listener| {
+            tokio::spawn(run_one_server(
+                config.clone(),
+                listener,
+                logind_path.clone(),
+                tx.clone(),
+            ))
+        })
         .collect();
 
     for handle in servers.into_iter() {
@@ -210,6 +224,7 @@ async fn run(config: thrussh::server::Config, listeners: Vec<std::net::TcpListen
 async fn run_one_server(
     config: Arc<thrussh::server::Config>,
     listener: std::net::TcpListener,
+    logind_path: Arc<PathBuf>,
     alive: mpsc::Sender<()>,
 ) {
     let _ = alive;
@@ -240,7 +255,7 @@ async fn run_one_server(
                 tokio::spawn(run_forward(
                     config.clone(),
                     stream,
-                    handler::Handler::new(client_addr, lport),
+                    handler::Handler::new(client_addr, lport, logind_path.clone()),
                     alive.clone(),
                 ));
             }

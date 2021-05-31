@@ -10,4 +10,5 @@ pub(crate) struct Config {
     pub workers: Option<usize>,
     pub pid_file: Option<String>,
     pub log_level: Option<LevelFilter>,
+    pub logind_path: String,
 }
