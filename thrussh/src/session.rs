@@ -14,7 +14,7 @@
 //
 
 use crate::sshbuffer::SSHBuffer;
-use crate::{auth, cipher, kex, msg, negotiation};
+use crate::{auth, cipher, cipher::integrity, kex, msg, negotiation};
 use crate::{Channel, ChannelId, Disconnect, Limits};
 use byteorder::{BigEndian, ByteOrder};
 use cryptovec::CryptoVec;
@@ -32,7 +32,7 @@ pub(crate) struct Encrypted {
     pub exchange: Option<Exchange>,
     pub kex: kex::Algorithm,
     pub key: usize,
-    pub mac: Option<&'static str>,
+    pub mac: Option<integrity::Name>,
     pub session_id: hash::DigestBytes,
     pub rekey: Option<Kex>,
     pub channels: HashMap<ChannelId, Channel>,
@@ -470,9 +470,13 @@ impl KexDhDone {
             hash.clone()
         };
         // Now computing keys.
-        let c = self
-            .kex
-            .compute_keys(&session_id, &hash, self.names.cipher, is_server)?;
+        let c = self.kex.compute_keys(
+            &session_id,
+            &hash,
+            self.names.cipher,
+            self.names.mac,
+            is_server,
+        )?;
         Ok(NewKeys {
             exchange: self.exchange,
             names: self.names,

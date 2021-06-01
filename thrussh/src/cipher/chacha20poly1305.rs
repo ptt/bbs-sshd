@@ -15,7 +15,8 @@
 
 // http://cvsweb.openbsd.org/cgi-bin/cvsweb/src/usr.bin/ssh/PROTOCOL.chacha20poly1305?annotate=HEAD
 
-use super::super::Error;
+use crate::kex::ComputeKeys;
+use crate::Error;
 use byteorder::{BigEndian, ByteOrder};
 use sodium::chacha20::*;
 
@@ -30,30 +31,30 @@ pub struct SealingKey {
 
 const TAG_LEN: usize = 16;
 
-pub static CIPHER: super::Cipher = super::Cipher {
-    name: NAME,
-    block_len: 1,
-    key_len: 64,
-    make_sealing_cipher,
-    make_opening_cipher,
-};
-
 pub const NAME: super::Name = super::Name("chacha20-poly1305@openssh.com");
 
-fn make_sealing_cipher(k: &[u8], _iv: &[u8]) -> super::SealingCipher {
+pub fn make_sealing_cipher(keys: &ComputeKeys) -> Result<super::SealingCipher, Error> {
+    let k = keys.encryption_key(KEY_BYTES * 2)?;
     let mut k1 = Key([0; KEY_BYTES]);
     let mut k2 = Key([0; KEY_BYTES]);
     k1.0.clone_from_slice(&k[KEY_BYTES..]);
     k2.0.clone_from_slice(&k[..KEY_BYTES]);
-    super::SealingCipher::Chacha20Poly1305(SealingKey { k1, k2 })
+    Ok(super::SealingCipher::Chacha20Poly1305(SealingKey {
+        k1,
+        k2,
+    }))
 }
 
-fn make_opening_cipher(k: &[u8], _iv: &[u8]) -> super::OpeningCipher {
+pub fn make_opening_cipher(keys: &ComputeKeys) -> Result<super::OpeningCipher, Error> {
+    let k = keys.encryption_key(KEY_BYTES * 2)?;
     let mut k1 = Key([0; KEY_BYTES]);
     let mut k2 = Key([0; KEY_BYTES]);
     k1.0.clone_from_slice(&k[KEY_BYTES..]);
     k2.0.clone_from_slice(&k[..KEY_BYTES]);
-    super::OpeningCipher::Chacha20Poly1305(OpeningKey { k1, k2 })
+    Ok(super::OpeningCipher::Chacha20Poly1305(OpeningKey {
+        k1,
+        k2,
+    }))
 }
 
 fn make_counter(sequence_number: u32) -> Nonce {

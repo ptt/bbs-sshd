@@ -12,25 +12,58 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 //
+use crate::kex::ComputeKeys;
 use crate::sshbuffer::SSHBuffer;
 use crate::Error;
 use byteorder::{BigEndian, ByteOrder};
+use integrity::Auth;
 use std::num::Wrapping;
 use tokio::io::{AsyncRead, AsyncReadExt};
+pub mod aes;
 pub mod chacha20poly1305;
 pub mod clear;
+pub mod integrity;
 
-pub struct Cipher {
-    pub name: Name,
-    pub block_len: usize,
-    pub key_len: usize,
-    pub make_opening_cipher: fn(key: &[u8], iv: &[u8]) -> OpeningCipher,
-    pub make_sealing_cipher: fn(key: &[u8], iv: &[u8]) -> SealingCipher,
+pub fn make_opening_cipher(
+    cipher_name: Name,
+    mac_name: Option<integrity::Name>,
+    keys: &ComputeKeys,
+) -> Result<OpeningCipher, Error> {
+    Ok(match cipher_name {
+        chacha20poly1305::NAME => chacha20poly1305::make_opening_cipher(keys)?,
+        aes::AES128_CTR_NAME | aes::AES256_CTR_NAME => {
+            OpeningCipher::AesCtr(aes::CounterState::new_from_name(
+                cipher_name,
+                keys,
+                Auth::new_from_name(mac_name.unwrap_or(integrity::NONE), keys)?,
+            )?)
+        }
+        _ => return Err(Error::NoCommonCipher),
+    })
+}
+
+pub fn make_sealing_cipher(
+    cipher_name: Name,
+    mac_name: Option<integrity::Name>,
+    keys: &ComputeKeys,
+) -> Result<SealingCipher, Error> {
+    Ok(match cipher_name {
+        chacha20poly1305::NAME => chacha20poly1305::make_sealing_cipher(keys)?,
+        aes::AES128_CTR_NAME | aes::AES256_CTR_NAME => {
+            SealingCipher::AesCtr(aes::CounterState::new_from_name(
+                cipher_name,
+                keys,
+                Auth::new_from_name(mac_name.unwrap_or(integrity::NONE), keys)?,
+            )?)
+        }
+        _ => return Err(Error::NoCommonCipher),
+    })
 }
 
 pub enum OpeningCipher {
     Clear(clear::Key),
     Chacha20Poly1305(chacha20poly1305::OpeningKey),
+    AesCtr(aes::CounterState),
 }
 
 impl<'a> OpeningCipher {
@@ -38,6 +71,7 @@ impl<'a> OpeningCipher {
         match *self {
             OpeningCipher::Clear(ref key) => key,
             OpeningCipher::Chacha20Poly1305(ref key) => key,
+            OpeningCipher::AesCtr(ref key) => key,
         }
     }
 }
@@ -45,6 +79,7 @@ impl<'a> OpeningCipher {
 pub enum SealingCipher {
     Clear(clear::Key),
     Chacha20Poly1305(chacha20poly1305::SealingKey),
+    AesCtr(aes::CounterState),
 }
 
 impl<'a> SealingCipher {
@@ -52,6 +87,7 @@ impl<'a> SealingCipher {
         match *self {
             SealingCipher::Clear(ref key) => key,
             SealingCipher::Chacha20Poly1305(ref key) => key,
+            SealingCipher::AesCtr(ref key) => key,
         }
     }
 }

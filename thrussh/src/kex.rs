@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 //
-use crate::{cipher, key, msg};
+use crate::{cipher, cipher::integrity, key, msg};
 use byteorder::{BigEndian, ByteOrder};
 
 use crate::session::Exchange;
@@ -47,7 +47,6 @@ impl AsRef<str> for Name {
 pub const CURVE25519: Name = Name("curve25519-sha256@libssh.org");
 
 thread_local! {
-    static IV_BUF: RefCell<CryptoVec> = RefCell::new(CryptoVec::new());
     static KEY_BUF: RefCell<CryptoVec> = RefCell::new(CryptoVec::new());
     static BUFFER: RefCell<CryptoVec> = RefCell::new(CryptoVec::new());
 }
@@ -160,34 +159,91 @@ impl Algorithm {
         session_id: &openssl::hash::DigestBytes,
         exchange_hash: &openssl::hash::DigestBytes,
         cipher: cipher::Name,
+        mac: Option<integrity::Name>,
         is_server: bool,
     ) -> Result<super::cipher::CipherPair, crate::Error> {
-        let cipher = match cipher {
-            super::cipher::chacha20poly1305::NAME => &super::cipher::chacha20poly1305::CIPHER,
-            _ => unreachable!(),
-        };
-
         // https://tools.ietf.org/html/rfc4253#section-7.2
-        BUFFER.with(|buffer| {
-            let compute_key = |c, key: &mut CryptoVec, len| -> Result<(), crate::Error> {
+        let local_to_remote = cipher::make_sealing_cipher(
+            cipher,
+            mac,
+            &ComputeKeys {
+                shared_secret: self.shared_secret.as_ref(),
+                session_id: &session_id,
+                exchange_hash: &exchange_hash,
+                c_iv_enc_int: c_local_to_remote(is_server),
+            },
+        )?;
+        let remote_to_local = cipher::make_opening_cipher(
+            cipher,
+            mac,
+            &ComputeKeys {
+                shared_secret: self.shared_secret.as_ref(),
+                session_id: &session_id,
+                exchange_hash: &exchange_hash,
+                c_iv_enc_int: c_remote_to_local(is_server),
+            },
+        )?;
+        Ok(super::cipher::CipherPair {
+            local_to_remote,
+            remote_to_local,
+        })
+    }
+}
+
+fn c_local_to_remote(is_server: bool) -> (u8, u8, u8) {
+    c_remote_to_local(!is_server)
+}
+
+fn c_remote_to_local(is_server: bool) -> (u8, u8, u8) {
+    if is_server {
+        (b'A', b'C', b'E')
+    } else {
+        (b'B', b'D', b'F')
+    }
+}
+
+pub struct ComputeKeys<'a> {
+    shared_secret: Option<&'a sodium::scalarmult::GroupElement>,
+    session_id: &'a openssl::hash::DigestBytes,
+    exchange_hash: &'a openssl::hash::DigestBytes,
+    c_iv_enc_int: (u8, u8, u8),
+}
+
+impl ComputeKeys<'_> {
+    pub fn iv(&self, len: usize) -> Result<Vec<u8>, crate::Error> {
+        self.compute_keys(self.c_iv_enc_int.0, len)
+    }
+
+    pub fn encryption_key(&self, len: usize) -> Result<Vec<u8>, crate::Error> {
+        self.compute_keys(self.c_iv_enc_int.1, len)
+    }
+
+    pub fn integrity_key(&self, len: usize) -> Result<Vec<u8>, crate::Error> {
+        self.compute_keys(self.c_iv_enc_int.2, len)
+    }
+
+    fn compute_keys(&self, c: u8, len: usize) -> Result<Vec<u8>, crate::Error> {
+        KEY_BUF.with(|key| {
+            let mut key = key.borrow_mut();
+            key.clear();
+            BUFFER.with(|buffer| {
                 let mut buffer = buffer.borrow_mut();
                 buffer.clear();
-                key.clear();
 
                 if let Some(ref shared) = self.shared_secret {
                     buffer.extend_ssh_mpint(&shared.0);
                 }
 
-                buffer.extend(exchange_hash.as_ref());
+                buffer.extend(self.exchange_hash);
                 buffer.push(c);
-                buffer.extend(session_id.as_ref());
+                buffer.extend(self.session_id);
                 use openssl::hash::*;
                 let hash = {
                     let mut hasher = Hasher::new(MessageDigest::sha256())?;
                     hasher.update(&buffer)?;
                     hasher.finish()?
                 };
-                key.extend(hash.as_ref());
+                key.extend(&hash);
 
                 while key.len() < len {
                     // extend.
@@ -195,46 +251,16 @@ impl Algorithm {
                     if let Some(ref shared) = self.shared_secret {
                         buffer.extend_ssh_mpint(&shared.0);
                     }
-                    buffer.extend(exchange_hash.as_ref());
-                    buffer.extend(key);
+                    buffer.extend(self.exchange_hash);
+                    buffer.extend(&key);
                     let hash = {
                         let mut hasher = Hasher::new(MessageDigest::sha256())?;
                         hasher.update(&buffer)?;
                         hasher.finish()?
                     };
-                    key.extend(&hash.as_ref());
+                    key.extend(&hash);
                 }
-                Ok(())
-            };
-
-            let (iv_local_to_remote, iv_remote_to_local) = if is_server {
-                (b'B', b'A')
-            } else {
-                (b'A', b'B')
-            };
-            let (key_local_to_remote, key_remote_to_local) = if is_server {
-                (b'D', b'C')
-            } else {
-                (b'C', b'D')
-            };
-
-            IV_BUF.with(|iv| {
-                KEY_BUF.with(|key| {
-                    let mut iv = iv.borrow_mut();
-                    let mut key = key.borrow_mut();
-                    compute_key(iv_local_to_remote, &mut iv, cipher.block_len)?;
-                    compute_key(key_local_to_remote, &mut key, cipher.key_len)?;
-                    let local_to_remote = (cipher.make_sealing_cipher)(&key, &iv);
-
-                    compute_key(iv_remote_to_local, &mut iv, cipher.block_len)?;
-                    compute_key(key_remote_to_local, &mut key, cipher.key_len)?;
-                    let remote_to_local = (cipher.make_opening_cipher)(&key, &iv);
-
-                    Ok(super::cipher::CipherPair {
-                        local_to_remote,
-                        remote_to_local,
-                    })
-                })
+                Ok(key[..len].to_vec())
             })
         })
     }

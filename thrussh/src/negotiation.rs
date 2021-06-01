@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 //
-use crate::{cipher, kex, msg, Error};
+use crate::{cipher, cipher::integrity, kex, msg, Error};
 use std::str::from_utf8;
 use thrussh_keys::key;
 // use super::mac; // unimplemented
@@ -27,7 +27,7 @@ pub struct Names {
     pub kex: kex::Name,
     pub key: key::Name,
     pub cipher: cipher::Name,
-    pub mac: Option<&'static str>,
+    pub mac: Option<integrity::Name>,
     pub server_compression: Compression,
     pub client_compression: Compression,
     pub ignore_guessed: bool,
@@ -43,7 +43,7 @@ pub struct Preferred {
     /// Preferred symmetric ciphers.
     pub cipher: &'static [cipher::Name],
     /// Preferred MAC algorithms.
-    pub mac: &'static [&'static str],
+    pub mac: &'static [integrity::Name],
     /// Preferred compression algorithms.
     pub compression: &'static [&'static str],
 }
@@ -52,16 +52,32 @@ impl Preferred {
     pub const DEFAULT: Preferred = Preferred {
         kex: &[kex::CURVE25519],
         key: &[key::ED25519, key::RSA_SHA2_256, key::RSA_SHA2_512],
-        cipher: &[cipher::chacha20poly1305::NAME],
-        mac: &["none"],
+        cipher: &[
+            cipher::chacha20poly1305::NAME,
+            cipher::aes::AES128_CTR_NAME,
+            cipher::aes::AES256_CTR_NAME,
+        ],
+        mac: &[
+            integrity::NONE,
+            integrity::HMAC_SHA2_256,
+            integrity::HMAC_SHA2_512,
+        ],
         compression: &["none", "zlib", "zlib@openssh.com"],
     };
 
     pub const COMPRESSED: Preferred = Preferred {
         kex: &[kex::CURVE25519],
         key: &[key::ED25519, key::RSA_SHA2_256, key::RSA_SHA2_512],
-        cipher: &[cipher::chacha20poly1305::NAME],
-        mac: &["none"],
+        cipher: &[
+            cipher::chacha20poly1305::NAME,
+            cipher::aes::AES128_CTR_NAME,
+            cipher::aes::AES256_CTR_NAME,
+        ],
+        mac: &[
+            integrity::NONE,
+            integrity::HMAC_SHA2_256,
+            integrity::HMAC_SHA2_512,
+        ],
         compression: &["zlib", "zlib@openssh.com", "none"],
     };
 }
