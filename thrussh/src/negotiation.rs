@@ -61,6 +61,7 @@ impl Preferred {
             integrity::NONE,
             integrity::HMAC_SHA2_256,
             integrity::HMAC_SHA2_512,
+            integrity::HMAC_SHA1,
         ],
         compression: &["none", "zlib", "zlib@openssh.com"],
     };
@@ -77,6 +78,7 @@ impl Preferred {
             integrity::NONE,
             integrity::HMAC_SHA2_256,
             integrity::HMAC_SHA2_512,
+            integrity::HMAC_SHA1,
         ],
         compression: &["zlib", "zlib@openssh.com", "none"],
     };
