@@ -32,6 +32,7 @@ impl Algorithms {
         Ok(match name {
             CURVE25519 => Algorithms::Ecdh(ecdh::Algorithm::new_curve25519()?),
             DH_GROUP14_SHA1 => Algorithms::Dh(dh::Algorithm::new_group14_sha1()?),
+            DH_GROUP14_SHA256 => Algorithms::Dh(dh::Algorithm::new_group14_sha256()?),
             _ => return Err(crate::Error::NoCommonKexAlgo),
         })
     }
@@ -78,6 +79,7 @@ impl AsRef<str> for Name {
 }
 pub const CURVE25519: Name = Name("curve25519-sha256@libssh.org");
 pub const DH_GROUP14_SHA1: Name = Name("diffie-hellman-group14-sha1");
+pub const DH_GROUP14_SHA256: Name = Name("diffie-hellman-group14-sha256");
 
 thread_local! {
     static KEY_BUF: RefCell<CryptoVec> = RefCell::new(CryptoVec::new());
@@ -329,6 +331,14 @@ pub mod dh {
                 p: BigNum::get_rfc3526_prime_2048()?,
                 g: BigNum::from_u32(2)?,
                 digest: MessageDigest::sha1(),
+            })
+        }
+
+        pub fn new_group14_sha256() -> Result<Self, crate::Error> {
+            Ok(Algorithm {
+                p: BigNum::get_rfc3526_prime_2048()?,
+                g: BigNum::from_u32(2)?,
+                digest: MessageDigest::sha256(),
             })
         }
 

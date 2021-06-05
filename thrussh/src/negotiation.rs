@@ -50,7 +50,11 @@ pub struct Preferred {
 
 impl Preferred {
     pub const DEFAULT: Preferred = Preferred {
-        kex: &[kex::CURVE25519, kex::DH_GROUP14_SHA1],
+        kex: &[
+            kex::CURVE25519,
+            kex::DH_GROUP14_SHA1,
+            kex::DH_GROUP14_SHA256,
+        ],
         key: &[key::ED25519, key::RSA_SHA2_256, key::RSA_SHA2_512],
         cipher: &[
             cipher::chacha20poly1305::NAME,
@@ -67,7 +71,11 @@ impl Preferred {
     };
 
     pub const COMPRESSED: Preferred = Preferred {
-        kex: &[kex::CURVE25519, kex::DH_GROUP14_SHA1],
+        kex: &[
+            kex::CURVE25519,
+            kex::DH_GROUP14_SHA1,
+            kex::DH_GROUP14_SHA256,
+        ],
         key: &[key::ED25519, key::RSA_SHA2_256, key::RSA_SHA2_512],
         cipher: &[
             cipher::chacha20poly1305::NAME,
