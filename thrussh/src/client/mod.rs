@@ -208,7 +208,6 @@ pub struct Channel {
 }
 
 impl<H: Handler> Handle<H> {
-
     pub fn is_closed(&self) -> bool {
         self.sender.is_closed()
     }
@@ -1047,7 +1046,7 @@ thread_local! {
 
 impl KexDhDone {
     async fn server_key_check<H: Handler>(
-        mut self,
+        self,
         rekey: bool,
         handler: &mut Option<H>,
         buf: &[u8],
@@ -1064,39 +1063,26 @@ impl KexDhDone {
                 return Err(Error::UnknownKey.into());
             }
         }
-        HASH_BUFFER.with(|buffer| {
-            let mut buffer = buffer.borrow_mut();
-            buffer.clear();
-            let hash = {
-                let server_ephemeral = reader.read_string().map_err(crate::Error::from)?;
-                self.exchange.server_ephemeral.extend(server_ephemeral);
-                let signature = reader.read_string().map_err(crate::Error::from)?;
 
-                self.kex
-                    .compute_shared_secret(&self.exchange.server_ephemeral)?;
-                debug!("kexdhdone.exchange = {:?}", self.exchange);
-                let hash = self
-                    .kex
-                    .compute_exchange_hash(&pubkey, &self.exchange, &mut buffer)?;
-                debug!("exchange hash: {:?}", hash);
-                let signature = {
-                    let mut sig_reader = signature.reader(0);
-                    let sig_type = sig_reader.read_string().map_err(crate::Error::from)?;
-                    debug!("sig_type: {:?}", sig_type);
-                    sig_reader.read_string().map_err(crate::Error::from)?
-                };
-                use thrussh_keys::key::Verify;
-                debug!("signature: {:?}", signature);
-                if !pubkey.verify_server_auth(hash.as_ref(), signature) {
-                    debug!("wrong server sig");
-                    return Err(Error::WrongServerSig.into());
-                }
-                hash
-            };
-            let mut newkeys = self.compute_keys(hash, false)?;
-            newkeys.sent = true;
-            Ok(Kex::NewKeys(newkeys))
-        })
+        let output = self.kex.client_dh(&self.exchange, &pubkey, buf)?;
+
+        let session_id = if let Some(session_id) = self.session_id {
+            session_id
+        } else {
+            output.exchange_hash.clone()
+        };
+
+        let cipher = output.make_cipher(&session_id, false, self.names.cipher, self.names.mac)?;
+
+        Ok(Kex::NewKeys(crate::session::NewKeys {
+            exchange: self.exchange,
+            names: self.names,
+            key: self.key,
+            cipher,
+            session_id: session_id,
+            received: false,
+            sent: false,
+        }))
     }
 }
 
@@ -1127,8 +1113,7 @@ async fn reply<H: Handler>(
                 kexdhdone.names.ignore_guessed = false;
                 session.common.kex = Some(Kex::KexDhDone(kexdhdone));
                 Ok(session)
-            } else if buf[0] == msg::KEX_ECDH_REPLY {
-                // We've sent ECDH_INIT, waiting for ECDH_REPLY
+            } else {
                 session.common.kex = Some(kexdhdone.server_key_check(false, handler, buf).await?);
                 session
                     .common
@@ -1136,9 +1121,6 @@ async fn reply<H: Handler>(
                     .write(&[msg::NEWKEYS], &mut session.common.write_buffer);
                 session.flush()?;
                 Ok(session)
-            } else {
-                error!("Wrong packet received");
-                Err(Error::Inconsistent.into())
             }
         }
         Some(Kex::NewKeys(newkeys)) => {

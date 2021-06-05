@@ -30,7 +30,6 @@ pub(crate) struct Encrypted {
 
     // It's always Some, except when we std::mem::replace it temporarily.
     pub exchange: Option<Exchange>,
-    pub kex: kex::Algorithm,
     pub key: usize,
     pub mac: Option<integrity::Name>,
     pub session_id: hash::DigestBytes,
@@ -65,7 +64,7 @@ impl<C> CommonSession<C> {
     pub fn newkeys(&mut self, newkeys: NewKeys) {
         if let Some(ref mut enc) = self.encrypted {
             enc.exchange = Some(newkeys.exchange);
-            enc.kex = newkeys.kex;
+            //enc.kex = newkeys.kex;
             enc.key = newkeys.key;
             enc.mac = newkeys.names.mac;
             self.cipher = Arc::new(newkeys.cipher);
@@ -75,7 +74,7 @@ impl<C> CommonSession<C> {
     pub fn encrypted(&mut self, state: EncryptedState, newkeys: NewKeys) {
         self.encrypted = Some(Encrypted {
             exchange: Some(newkeys.exchange),
-            kex: newkeys.kex,
+            //kex: newkeys.kex,
             key: newkeys.key,
             mac: newkeys.names.mac,
             session_id: newkeys.session_id,
@@ -452,49 +451,16 @@ pub struct KexDh {
 #[derive(Debug)]
 pub struct KexDhDone {
     pub exchange: Exchange,
-    pub kex: kex::Algorithm,
+    pub kex: kex::Algorithms,
     pub key: usize,
     pub session_id: Option<hash::DigestBytes>,
     pub names: negotiation::Names,
-}
-
-impl KexDhDone {
-    pub fn compute_keys(
-        self,
-        hash: hash::DigestBytes,
-        is_server: bool,
-    ) -> Result<NewKeys, crate::Error> {
-        let session_id = if let Some(session_id) = self.session_id {
-            session_id
-        } else {
-            hash.clone()
-        };
-        // Now computing keys.
-        let c = self.kex.compute_keys(
-            &session_id,
-            &hash,
-            self.names.cipher,
-            self.names.mac,
-            is_server,
-        )?;
-        Ok(NewKeys {
-            exchange: self.exchange,
-            names: self.names,
-            kex: self.kex,
-            key: self.key,
-            cipher: c,
-            session_id: session_id,
-            received: false,
-            sent: false,
-        })
-    }
 }
 
 #[derive(Debug)]
 pub struct NewKeys {
     pub exchange: Exchange,
     pub names: negotiation::Names,
-    pub kex: kex::Algorithm,
     pub key: usize,
     pub cipher: cipher::CipherPair,
     pub session_id: hash::DigestBytes,

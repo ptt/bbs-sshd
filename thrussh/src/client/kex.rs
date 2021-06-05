@@ -34,11 +34,8 @@ impl KexInit {
         // extra buffer.
         let i0 = self.exchange.client_kex_init.len();
         debug!("i0 = {:?}", i0);
-        let kex = kex::Algorithm::client_dh(
-            algo.kex,
-            &mut self.exchange.client_ephemeral,
-            &mut self.exchange.client_kex_init,
-        )?;
+        let mut kex = kex::Algorithms::new(algo.kex)?;
+        kex.client_dh_init(&mut self.exchange.client_kex_init)?;
 
         cipher.write(&self.exchange.client_kex_init[i0..], write_buffer);
         self.exchange.client_kex_init.resize(i0);

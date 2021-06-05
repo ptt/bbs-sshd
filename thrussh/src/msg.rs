@@ -26,6 +26,9 @@ pub const SERVICE_ACCEPT: u8 = 6;
 pub const KEXINIT: u8 = 20;
 pub const NEWKEYS: u8 = 21;
 
+pub const KEXDH_INIT: u8 = 30;
+pub const KEXDH_REPLY: u8 = 31;
+
 // http://tools.ietf.org/html/rfc5656#section-7.1
 pub const KEX_ECDH_INIT: u8 = 30;
 pub const KEX_ECDH_REPLY: u8 = 31;

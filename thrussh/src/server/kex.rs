@@ -1,10 +1,8 @@
 use super::*;
 use crate::cipher::CipherPair;
-use crate::key::PubKey;
 use crate::negotiation::Select;
 use crate::{kex, msg, negotiation};
 use std::cell::RefCell;
-use thrussh_keys::encoding::{Encoding, Reader};
 
 thread_local! {
     static HASH_BUF: RefCell<CryptoVec> = RefCell::new(CryptoVec::new());
@@ -76,46 +74,37 @@ impl KexDh {
             self.names.ignore_guessed = false;
             Ok(Kex::KexDh(self))
         } else {
-            // Else, process it.
-            assert!(buf[0] == msg::KEX_ECDH_INIT);
-            let mut r = buf.reader(1);
-            self.exchange.client_ephemeral.extend(r.read_string()?);
-            let kex = kex::Algorithm::server_dh(self.names.kex, &mut self.exchange, buf)?;
-            // Then, we fill the write buffer right away, so that we
-            // can output it immediately when the time comes.
-            let kexdhdone = KexDhDone {
-                exchange: self.exchange,
-                kex: kex,
-                key: self.key,
-                names: self.names,
-                session_id: self.session_id,
-            };
-            let hash: Result<openssl::hash::DigestBytes, Error> = HASH_BUF.with(|buffer| {
-                let mut buffer = buffer.borrow_mut();
-                buffer.clear();
-                debug!("server kexdhdone.exchange = {:?}", kexdhdone.exchange);
-                let hash = kexdhdone.kex.compute_exchange_hash(
-                    &config.keys[kexdhdone.key],
-                    &kexdhdone.exchange,
-                    &mut buffer,
-                )?;
-                debug!("exchange hash: {:?}", hash);
-                buffer.clear();
-                buffer.push(msg::KEX_ECDH_REPLY);
-                config.keys[kexdhdone.key].push_to(&mut buffer);
-                // Server ephemeral
-                buffer.extend_ssh_string(&kexdhdone.exchange.server_ephemeral);
-                // Hash signature
-                debug!("signing with key {:?}", kexdhdone.key);
-                debug!("hash: {:?}", hash);
-                debug!("key: {:?}", config.keys[kexdhdone.key]);
-                config.keys[kexdhdone.key].add_signature(&mut buffer, &hash)?;
-                cipher.write(&buffer, write_buffer);
-                cipher.write(&[msg::NEWKEYS], write_buffer);
-                Ok(hash)
-            });
+            let kex = kex::Algorithms::new(self.names.kex)?;
 
-            Ok(Kex::NewKeys(kexdhdone.compute_keys(hash?, true)?))
+            let output = HASH_BUF.with(|reply| -> Result<kex::Output, Error> {
+                let mut reply = reply.borrow_mut();
+                let output =
+                    kex.server_dh(&self.exchange, &config.keys[self.key], buf, &mut reply)?;
+                cipher.write(&reply, write_buffer);
+                cipher.write(&[msg::NEWKEYS], write_buffer);
+                Ok(output)
+            })?;
+
+            if self.session_id.is_none() {
+                self.session_id.replace(output.exchange_hash.clone());
+            }
+
+            let cipher = output.make_cipher(
+                self.session_id.as_ref().unwrap(),
+                true,
+                self.names.cipher,
+                self.names.mac,
+            )?;
+
+            Ok(Kex::NewKeys(crate::session::NewKeys {
+                exchange: self.exchange,
+                names: self.names,
+                key: self.key,
+                cipher,
+                session_id: self.session_id.unwrap(),
+                received: false,
+                sent: false,
+            }))
         }
     }
 }
