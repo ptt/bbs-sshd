@@ -239,6 +239,16 @@ impl server::Handler for Handler {
         future::ready(Ok((self, Auth::Accept)))
     }
 
+    fn auth_password(mut self, user: &str, _password: &str) -> Self::FutureAuth {
+        debug!("[client {}] auth_password: {}", self.addr, user);
+        match user {
+            "bbs" => self.encoding = logind::ConnData::CONV_NORMAL,
+            "bbsu" => self.encoding = logind::ConnData::CONV_UTF8,
+            _ => return self.auth_reject(),
+        }
+        future::ready(Ok((self, Auth::Accept)))
+    }
+
     fn auth_keyboard_interactive(
         self,
         user: &str,

@@ -103,7 +103,9 @@ fn make_ssh_config(cfg: &config::Config) -> thrussh::server::Config {
 
     // Per RFC 4252 Sec. 7, "publickey" method is required. However, we are not going to accept it.
     // "keyboard-interactive" is used for printing out error messages about bad user names.
-    sshcfg.methods = thrussh::MethodSet::PUBLICKEY | thrussh::MethodSet::KEYBOARD_INTERACTIVE;
+    sshcfg.methods = thrussh::MethodSet::PUBLICKEY
+        | thrussh::MethodSet::KEYBOARD_INTERACTIVE
+        | thrussh::MethodSet::PASSWORD;
     if false {
         // debug rekey
         sshcfg.limits.rekey_time_limit = Duration::from_secs(10);
