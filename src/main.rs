@@ -1,7 +1,6 @@
 #![feature(destructuring_assignment)]
 mod config;
 mod handler;
-mod host_keys;
 mod logind;
 mod socket_linux;
 mod telnet;
@@ -13,6 +12,7 @@ use std::str::FromStr;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use syslog::{Facility, Formatter3164, LoggerBackend};
+use thrussh_keys::key::KeyPair;
 use tokio::signal::unix::{signal, SignalKind};
 use tokio::sync::mpsc;
 
@@ -86,6 +86,42 @@ fn drop_privileges(cfg: &config::Config) {
     }
 }
 
+fn load_host_keys(
+    cfg: &config::Config,
+    keys: &mut Vec<KeyPair>,
+    key_algos: &mut Vec<thrussh_keys::key::Name>,
+) {
+    for path in &cfg.host_keys {
+        let key = thrussh_keys::load_secret_key(path, None).expect("failed to load key");
+        use thrussh_keys::key::*;
+        match key {
+            KeyPair::RSA { key, .. } => {
+                keys.push(KeyPair::RSA {
+                    key: key.clone(),
+                    hash: SignatureHash::SHA2_512,
+                });
+                key_algos.push(RSA_SHA2_512);
+
+                keys.push(KeyPair::RSA {
+                    key: key.clone(),
+                    hash: SignatureHash::SHA2_256,
+                });
+                key_algos.push(RSA_SHA2_256);
+
+                keys.push(KeyPair::RSA {
+                    key: key.clone(),
+                    hash: SignatureHash::SHA1,
+                });
+                key_algos.push(SSH_RSA);
+            }
+            KeyPair::Ed25519(key) => {
+                keys.push(KeyPair::Ed25519(key));
+                key_algos.push(ED25519);
+            }
+        }
+    }
+}
+
 fn make_ssh_config(cfg: &config::Config) -> thrussh::server::Config {
     let mut sshcfg = thrussh::server::Config::default();
     sshcfg.server_id = "SSH-2.0-bbs-sshd".to_string();
@@ -93,11 +129,7 @@ fn make_ssh_config(cfg: &config::Config) -> thrussh::server::Config {
     sshcfg.connection_timeout = None;
 
     let mut key_algos = Vec::new();
-    for path in &cfg.host_keys {
-        let pem = std::fs::read_to_string(path).expect("failed to read key");
-        host_keys::convert_key(&pem, &mut sshcfg.keys, &mut key_algos)
-            .expect("failed to parse key");
-    }
+    load_host_keys(cfg, &mut sshcfg.keys, &mut key_algos);
     sshcfg.preferred.key = key_algos.leak();
     sshcfg.preferred.compression = &["none"];
 
