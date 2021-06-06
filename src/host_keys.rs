@@ -1,6 +1,6 @@
 use openssl::{error::ErrorStack, pkey::Private, rsa::Rsa};
 use thrussh_keys::key::{
-    ed25519, KeyPair, Name, SignatureHash, ED25519, RSA_SHA2_256, RSA_SHA2_512,
+    ed25519, KeyPair, Name, SignatureHash, ED25519, RSA_SHA2_256, RSA_SHA2_512, SSH_RSA,
 };
 
 #[derive(Debug)]
@@ -75,6 +75,12 @@ pub(crate) fn convert_key<'a, 'b, 'c>(
             ref q,
         }) => {
             let key = make_rsa_key(n, e, d, iqmp, p, q).map_err(Error::from)?;
+
+            keys.push(KeyPair::RSA {
+                key: key.clone(),
+                hash: SignatureHash::SHA1,
+            });
+            key_algos.push(SSH_RSA);
 
             keys.push(KeyPair::RSA {
                 key: key.clone(),
