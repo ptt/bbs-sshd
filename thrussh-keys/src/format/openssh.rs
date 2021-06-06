@@ -1,7 +1,7 @@
 use crate::bcrypt_pbkdf;
 use crate::encoding::Reader;
 use crate::key;
-use crate::{Error, KEYTYPE_ED25519, KEYTYPE_RSA};
+use crate::Error;
 use cryptovec::CryptoVec;
 use openssl::bn::BigNum;
 use openssl::symm::{Cipher, Crypter, Mode};
@@ -31,7 +31,7 @@ pub fn decode_openssh(secret: &[u8], password: Option<&[u8]>) -> Result<key::Key
         let _check1 = position.read_u32()?;
         for _ in 0..nkeys {
             let key_type = position.read_string()?;
-            if key_type == KEYTYPE_ED25519 {
+            if key_type == crate::KEYTYPE_ED25519 {
                 let pubkey = position.read_string()?;
                 let seckey = position.read_string()?;
                 let _comment = position.read_string()?;
@@ -40,7 +40,7 @@ pub fn decode_openssh(secret: &[u8], password: Option<&[u8]>) -> Result<key::Key
                 let mut secret = SecretKey::new_zeroed();
                 secret.key.clone_from_slice(seckey);
                 return Ok(key::KeyPair::Ed25519(secret));
-            } else if key_type == KEYTYPE_RSA {
+            } else if key_type == crate::KEYTYPE_RSA {
                 let n = BigNum::from_slice(position.read_string()?)?;
                 let e = BigNum::from_slice(position.read_string()?)?;
                 let d = BigNum::from_slice(position.read_string()?)?;
@@ -68,6 +68,30 @@ pub fn decode_openssh(secret: &[u8], password: Option<&[u8]>) -> Result<key::Key
                     key,
                     hash: key::SignatureHash::SHA2_512,
                 });
+            } else if key_type == crate::KEYTYPE_ECDSA_SHA2_NISTP256
+                || key_type == crate::KEYTYPE_ECDSA_SHA2_NISTP384
+                || key_type == crate::KEYTYPE_ECDSA_SHA2_NISTP521
+            {
+                let ident = position.read_string()?;
+                let pubkey = position.read_string()?;
+                let seckey = position.read_string()?;
+                let _comment = position.read_string()?;
+
+                let typ = crate::key::EcKeyType::new_from_name(key_type).unwrap();
+                if typ.ident().as_bytes() != ident {
+                    return Err(Error::CouldNotReadKey.into());
+                }
+
+                use openssl::ec::*;
+                use openssl::pkey::Private;
+                let group = EcGroup::from_curve_name(typ.curve_nid())?;
+                let mut cx = openssl::bn::BigNumContext::new()?;
+                let point = EcPoint::from_bytes(&group, pubkey, &mut cx)?;
+                let private = BigNum::from_slice(seckey)?;
+                let key = openssl::ec::EcKey::<Private>::from_private_components(
+                    &group, &private, &point,
+                )?;
+                return Ok(key::KeyPair::Ec { key, typ });
             } else {
                 return Err(Error::UnsupportedKeyType(key_type.to_vec()).into());
             }

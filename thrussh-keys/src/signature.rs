@@ -10,12 +10,17 @@ use std::fmt;
 pub struct SignatureBytes(pub [u8; 64]);
 
 /// The type of a signature, depending on the algorithm used.
-#[derive(Serialize, Deserialize, Clone)]
+#[derive(Clone)]
 pub enum Signature {
     /// An Ed25519 signature
     Ed25519(SignatureBytes),
     /// An RSA signature
     RSA { hash: SignatureHash, bytes: Vec<u8> },
+    /// An ECDSA signature
+    Ecdsa {
+        typ: crate::key::EcKeyType,
+        bytes: Vec<u8>,
+    },
 }
 
 impl Signature {
@@ -37,6 +42,7 @@ impl Signature {
             } => {
                 let t = match hash {
                     SignatureHash::SHA2_256 => &b"rsa-sha2-256"[..],
+                    SignatureHash::SHA2_384 => unreachable!(),
                     SignatureHash::SHA2_512 => &b"rsa-sha2-512"[..],
                     SignatureHash::SHA1 => &b"ssh-rsa"[..],
                 };
@@ -45,6 +51,14 @@ impl Signature {
                     .unwrap();
                 bytes_.extend_ssh_string(t);
                 bytes_.extend_ssh_string(&bytes[..]);
+            }
+            Signature::Ecdsa { bytes, typ } => {
+                let name = typ.name().as_bytes();
+                bytes_
+                    .write_u32::<BigEndian>((name.len() + bytes.len() + 8) as u32)
+                    .unwrap();
+                bytes_.extend_ssh_string(name);
+                bytes_.extend_ssh_string(bytes);
             }
         }
         data_encoding::BASE64_NOPAD.encode(&bytes_[..])
@@ -85,6 +99,7 @@ impl AsRef<[u8]> for Signature {
         match *self {
             Signature::Ed25519(ref signature) => &signature.0,
             Signature::RSA { ref bytes, .. } => &bytes[..],
+            Signature::Ecdsa { ref bytes, .. } => &bytes[..],
         }
     }
 }

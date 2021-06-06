@@ -251,6 +251,7 @@ fn test_read_write_pkcs8() {
     match key {
         key::KeyPair::Ed25519 { .. } => println!("Ed25519"),
         key::KeyPair::RSA { .. } => println!("RSA"),
+        key::KeyPair::Ec { ref typ, .. } => println!("EC {{ {} }}", typ.name()),
     }
 }
 
@@ -303,6 +304,7 @@ pub fn encode_pkcs8(key: &key::KeyPair) -> Vec<u8> {
         writer.write_sequence(|writer| match *key {
             key::KeyPair::Ed25519(ref secret) => write_key_v1(writer, secret),
             key::KeyPair::RSA { ref key, .. } => write_key_v0(writer, key),
+            key::KeyPair::Ec { .. } => unimplemented!(),
         })
     })
 }

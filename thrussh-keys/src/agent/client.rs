@@ -48,8 +48,10 @@ impl AgentClient<tokio::net::UnixStream> {
             return Err(Error::EnvVar("SSH_AUTH_SOCK"));
         };
         match Self::connect_uds(var).await {
-            Err(Error::IO(io_err)) if io_err.kind() == std::io::ErrorKind::NotFound => Err(Error::BadAuthSock),
-            owise => owise
+            Err(Error::IO(io_err)) if io_err.kind() == std::io::ErrorKind::NotFound => {
+                Err(Error::BadAuthSock)
+            }
+            owise => owise,
         }
     }
 }
@@ -123,6 +125,7 @@ impl<S: AsyncRead + AsyncWrite + Unpin> AgentClient<S> {
                 self.buf.extend_ssh_mpint(&key.q().unwrap().to_vec());
                 self.buf.extend_ssh_string(b"");
             }
+            key::KeyPair::Ec { .. } => unimplemented!(),
         }
         if !constraints.is_empty() {
             self.buf.push_u32_be(constraints.len() as u32);
@@ -309,6 +312,7 @@ impl<S: AsyncRead + AsyncWrite + Unpin> AgentClient<S> {
         let hash = match public {
             PublicKey::RSA { hash, .. } => match hash {
                 SignatureHash::SHA2_256 => 2,
+                SignatureHash::SHA2_384 => unreachable!(),
                 SignatureHash::SHA2_512 => 4,
                 SignatureHash::SHA1 => 0,
             },
@@ -491,5 +495,6 @@ fn key_blob(public: &key::PublicKey, buf: &mut CryptoVec) {
             let len1 = buf.len();
             BigEndian::write_u32(&mut buf[5..], (len1 - len0) as u32);
         }
+        PublicKey::Ec { .. } => unimplemented!(),
     }
 }

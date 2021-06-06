@@ -38,6 +38,9 @@ impl PubKey for PublicKey {
                 buffer.extend_ssh_mpint(&e);
                 buffer.extend_ssh_mpint(&n);
             }
+            &PublicKey::Ec { ref key, ref typ } => {
+                write_ec_public_key(buffer, key.0.ec_key().unwrap().as_ref(), typ);
+            }
         }
     }
 }
@@ -59,6 +62,32 @@ impl PubKey for KeyPair {
                 buffer.extend_ssh_mpint(&e);
                 buffer.extend_ssh_mpint(&n);
             }
+            &KeyPair::Ec { ref key, ref typ } => {
+                write_ec_public_key(buffer, key, typ);
+            }
         }
     }
+}
+
+pub fn write_ec_public_key<T: openssl::pkey::HasPublic>(
+    buf: &mut CryptoVec,
+    key: &openssl::ec::EcKeyRef<T>,
+    typ: &thrussh_keys::key::EcKeyType,
+) {
+    let name = typ.name().as_bytes();
+    let ident = typ.ident().as_bytes();
+    let mut cx = openssl::bn::BigNumContext::new().unwrap();
+    let q = key
+        .public_key()
+        .to_bytes(
+            key.group(),
+            openssl::ec::PointConversionForm::UNCOMPRESSED,
+            &mut cx,
+        )
+        .unwrap();
+
+    buf.push_u32_be((name.len() + ident.len() + q.len() + 12) as u32);
+    buf.extend_ssh_string(name);
+    buf.extend_ssh_string(ident);
+    buf.extend_ssh_string(&q);
 }

@@ -124,8 +124,10 @@ pub enum Error {
     ASN1(yasna::ASN1Error),
     #[error("Environment variable `{0}` not found")]
     EnvVar(&'static str),
-    #[error("Unable to connect to ssh-agent. The environment variable `SSH_AUTH_SOCK` \
-    was set, but it points to a nonexistent file or directory.")]
+    #[error(
+        "Unable to connect to ssh-agent. The environment variable `SSH_AUTH_SOCK` \
+    was set, but it points to a nonexistent file or directory."
+    )]
     BadAuthSock,
 }
 
@@ -137,6 +139,9 @@ impl From<yasna::ASN1Error> for Error {
 
 const KEYTYPE_ED25519: &'static [u8] = b"ssh-ed25519";
 const KEYTYPE_RSA: &'static [u8] = b"ssh-rsa";
+const KEYTYPE_ECDSA_SHA2_NISTP256: &'static [u8] = b"ecdsa-sha2-nistp256";
+const KEYTYPE_ECDSA_SHA2_NISTP384: &'static [u8] = b"ecdsa-sha2-nistp384";
+const KEYTYPE_ECDSA_SHA2_NISTP521: &'static [u8] = b"ecdsa-sha2-nistp521";
 
 /// Load a public key from a file. Ed25519 and RSA keys are supported.
 ///
@@ -199,6 +204,9 @@ impl PublicKeyBase64 for key::PublicKey {
                 s.extend_ssh_mpint(&key.0.rsa().unwrap().e().to_vec());
                 s.extend_ssh_mpint(&key.0.rsa().unwrap().n().to_vec());
             }
+            key::PublicKey::Ec { ref key, ref typ } => {
+                write_ec_public_key(&mut s, key.0.ec_key().unwrap().as_ref(), typ);
+            }
         }
         s
     }
@@ -206,24 +214,49 @@ impl PublicKeyBase64 for key::PublicKey {
 
 impl PublicKeyBase64 for key::KeyPair {
     fn public_key_bytes(&self) -> Vec<u8> {
-        let name = self.name().as_bytes();
         let mut s = Vec::new();
-        s.write_u32::<BigEndian>(name.len() as u32).unwrap();
-        s.extend_from_slice(name);
+        use encoding::Encoding;
         match *self {
             key::KeyPair::Ed25519(ref key) => {
+                s.extend_ssh_string(self.name().as_bytes());
                 let public = &key.key[32..];
                 s.write_u32::<BigEndian>(32).unwrap();
                 s.extend_from_slice(&public);
             }
             key::KeyPair::RSA { ref key, .. } => {
-                use encoding::Encoding;
+                s.extend_ssh_string(self.name().as_bytes());
                 s.extend_ssh_mpint(&key.e().to_vec());
                 s.extend_ssh_mpint(&key.n().to_vec());
+            }
+            key::KeyPair::Ec { ref key, ref typ } => {
+                write_ec_public_key(&mut s, key.as_ref(), typ);
             }
         }
         s
     }
+}
+
+fn write_ec_public_key<T: openssl::pkey::HasPublic>(
+    buf: &mut Vec<u8>,
+    key: &openssl::ec::EcKeyRef<T>,
+    typ: &key::EcKeyType,
+) {
+    let name = typ.name().as_bytes();
+    let ident = typ.ident().as_bytes();
+    let mut cx = openssl::bn::BigNumContext::new().unwrap();
+    let q = key
+        .public_key()
+        .to_bytes(
+            key.group(),
+            openssl::ec::PointConversionForm::UNCOMPRESSED,
+            &mut cx,
+        )
+        .unwrap();
+
+    use encoding::Encoding;
+    buf.extend_ssh_string(name);
+    buf.extend_ssh_string(ident);
+    buf.extend_ssh_string(&q);
 }
 
 /// Write a public key onto the provided `Write`, encoded in base-64.
@@ -616,6 +649,94 @@ KJaj7gc0n6gmKY6r0/Ddufy1JZ6eihBCSJ64RARBXeg2rZpyT+xxhMEZLK5meOeR
         let buf = b"blabla";
         let sig = key.sign_detached(buf).unwrap();
         assert!(public.verify_detached(buf, sig.as_ref()));
+    }
+
+    fn ecdsa_sign_verify(key: &str, public: &str) {
+        let key = decode_secret_key(key, None).unwrap();
+        let buf = b"blabla";
+        let sig = key.sign_detached(buf).unwrap();
+        // Verify using the provided public key.
+        {
+            let public = parse_public_key_base64(public).unwrap();
+            assert!(public.verify_detached(buf, sig.as_ref()));
+        }
+        // Verify using public key derived from the secret key.
+        {
+            let public = key.clone_public_key();
+            assert!(public.verify_detached(buf, sig.as_ref()));
+        }
+        // Sanity check that it uses a different random number.
+        {
+            let sig2 = key.sign_detached(buf).unwrap();
+            match (sig, sig2) {
+                (
+                    key::Signature::Ecdsa { bytes, typ },
+                    key::Signature::Ecdsa {
+                        bytes: bytes2,
+                        typ: typ2,
+                    },
+                ) => {
+                    assert_ne!(bytes, bytes2);
+                    assert_eq!(typ, typ2);
+                }
+                _ => assert!(false),
+            }
+        }
+    }
+
+    #[test]
+    fn test_ecdsa_sha2_nistp256_sign_verify() {
+        env_logger::try_init().unwrap_or(());
+        let key = "-----BEGIN OPENSSH PRIVATE KEY-----
+b3BlbnNzaC1rZXktdjEAAAAABG5vbmUAAAAEbm9uZQAAAAAAAAABAAAAaAAAABNlY2RzYS
+1zaGEyLW5pc3RwMjU2AAAACG5pc3RwMjU2AAAAQQRQh23nB1wSlbAwhX3hrbNa35Z6vuY1
+CnEhAjk4FSWR1/tcna7RKCMXdYEiPs5rHr+mMoJxeQxmCd+ny8uIBrg1AAAAqKgQe5KoEH
+uSAAAAE2VjZHNhLXNoYTItbmlzdHAyNTYAAAAIbmlzdHAyNTYAAABBBFCHbecHXBKVsDCF
+feGts1rflnq+5jUKcSECOTgVJZHX+1ydrtEoIxd1gSI+zmsev6YygnF5DGYJ36fLy4gGuD
+UAAAAgFOgyq4FDOtEe+vBy1O1dqMLjXrKmqcgPpOO3+9cbPM0AAAAKZWNkc2FAdGVzdAEC
+AwQFBg==
+-----END OPENSSH PRIVATE KEY-----
+";
+        let public = "AAAAE2VjZHNhLXNoYTItbmlzdHAyNTYAAAAIbmlzdHAyNTYAAABBBFCHbecHXBKVsDCFfeGts1rflnq+5jUKcSECOTgVJZHX+1ydrtEoIxd1gSI+zmsev6YygnF5DGYJ36fLy4gGuDU=";
+        ecdsa_sign_verify(key, public);
+    }
+
+    #[test]
+    fn test_ecdsa_sha2_nistp384_sign_verify() {
+        env_logger::try_init().unwrap_or(());
+        let key = "-----BEGIN OPENSSH PRIVATE KEY-----
+b3BlbnNzaC1rZXktdjEAAAAABG5vbmUAAAAEbm9uZQAAAAAAAAABAAAAiAAAABNlY2RzYS
+1zaGEyLW5pc3RwMzg0AAAACG5pc3RwMzg0AAAAYQRC1ed+3MGnknPWE6rdbw9p5f91AJSC
+a469EDg5+EkDdVEEN1dWakAtI+gLRlpMotYD0Cso1Nx2MU9nW5fWLBmLtOWU6C1SX6INXB
+527U0Ex5AYetNPBIhdTWB1UhbVkxgAAADYiT5XRYk+V0UAAAATZWNkc2Etc2hhMi1uaXN0
+cDM4NAAAAAhuaXN0cDM4NAAAAGEEQtXnftzBp5Jz1hOq3W8PaeX/dQCUgmuOvRA4OfhJA3
+VRBDdXVmpALSPoC0ZaTKLWA9ArKNTcdjFPZ1uX1iwZi7TllOgtUl+iDVwedu1NBMeQGHrT
+TwSIXU1gdVIW1ZMYAAAAMH13rmHaaOv7SG4v/e3AV6yY49DzZD8YTzHRS62KDUPB/6t774
+PCeBxYsjjIg5q1FwAAAAplY2RzYUB0ZXN0AQIDBAUG
+-----END OPENSSH PRIVATE KEY-----
+";
+        let public = "AAAAE2VjZHNhLXNoYTItbmlzdHAzODQAAAAIbmlzdHAzODQAAABhBELV537cwaeSc9YTqt1vD2nl/3UAlIJrjr0QODn4SQN1UQQ3V1ZqQC0j6AtGWkyi1gPQKyjU3HYxT2dbl9YsGYu05ZToLVJfog1cHnbtTQTHkBh6008EiF1NYHVSFtWTGA==";
+        ecdsa_sign_verify(key, public);
+    }
+
+    #[test]
+    fn test_ecdsa_sha2_nistp521_sign_verify() {
+        env_logger::try_init().unwrap_or(());
+        let key = "-----BEGIN OPENSSH PRIVATE KEY-----
+b3BlbnNzaC1rZXktdjEAAAAABG5vbmUAAAAEbm9uZQAAAAAAAAABAAAArAAAABNlY2RzYS
+1zaGEyLW5pc3RwNTIxAAAACG5pc3RwNTIxAAAAhQQBuBviTf/tmSF3cLRpF1a6F1Gcq/19
+5YeQGfiD9Nw7bRqjSFYVvV1i5tjgOhmESwLpGoFQ0wHudj8FPwEjjqYMAowANXRtRE0cE6
+F/quoAjtvHGkGEFnw//8H8VYxk6Hkix+iY3w+V9EL3QcnJ0v6Acu1Bex4Mdy+QM7hOKzmG
+ALv/LoMAAAEIYLg60WC4OtEAAAATZWNkc2Etc2hhMi1uaXN0cDUyMQAAAAhuaXN0cDUyMQ
+AAAIUEAbgb4k3/7Zkhd3C0aRdWuhdRnKv9feWHkBn4g/TcO20ao0hWFb1dYubY4DoZhEsC
+6RqBUNMB7nY/BT8BI46mDAKMADV0bURNHBOhf6rqAI7bxxpBhBZ8P//B/FWMZOh5IsfomN
+8PlfRC90HJydL+gHLtQXseDHcvkDO4Tis5hgC7/y6DAAAAQgF9J14qBTjR9qZbh0BQrNdZ
+h0B9KSZKfh3uQQQEfsc5L9+LMZV1S3A+j0k44FXhfxoX752oUbRCJR5yKoUXHmCxLQAAAA
+plY2RzYUB0ZXN0
+-----END OPENSSH PRIVATE KEY-----
+";
+        let public = "AAAAE2VjZHNhLXNoYTItbmlzdHA1MjEAAAAIbmlzdHA1MjEAAACFBAG4G+JN/+2ZIXdwtGkXVroXUZyr/X3lh5AZ+IP03DttGqNIVhW9XWLm2OA6GYRLAukagVDTAe52PwU/ASOOpgwCjAA1dG1ETRwToX+q6gCO28caQYQWfD//wfxVjGToeSLH6JjfD5X0QvdBycnS/oBy7UF7Hgx3L5AzuE4rOYYAu/8ugw==";
+        ecdsa_sign_verify(key, public);
     }
 
     #[test]
