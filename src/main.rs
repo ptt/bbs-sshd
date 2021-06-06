@@ -118,6 +118,11 @@ fn load_host_keys(
                 keys.push(KeyPair::Ed25519(key));
                 key_algos.push(ED25519);
             }
+            KeyPair::Ec { key, typ } => {
+                let key = KeyPair::Ec { key, typ };
+                key_algos.push(thrussh_keys::key::Name(key.name()));
+                keys.push(key);
+            }
         }
     }
 }
