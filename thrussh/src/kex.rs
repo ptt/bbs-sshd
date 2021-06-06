@@ -186,7 +186,7 @@ pub mod ecdh {
             super::check_packet_type(r.read_byte()?, msg::KEX_ECDH_INIT)?;
 
             let mut client_pubkey = GroupElement([0; 32]);
-            client_pubkey.0.clone_from_slice(r.read_string()?);
+            super::checked_clone(&mut client_pubkey.0, r.read_string()?)?;
             debug!("client_pubkey: {:?}", client_pubkey);
 
             let mut server_secret = Scalar([0; 32]);
@@ -240,7 +240,7 @@ pub mod ecdh {
             super::check_packet_type(r.read_byte()?, msg::KEX_ECDH_REPLY)?;
 
             let mut server_pubkey = GroupElement([0; 32]);
-            server_pubkey.0.clone_from_slice(r.read_string()?);
+            super::checked_clone(&mut server_pubkey.0, r.read_string()?)?;
             debug!("server_pubkey: {:?}", server_pubkey);
             let signature = r.read_string()?;
 
@@ -473,6 +473,16 @@ fn check_packet_type(received: u8, expected: u8) -> Result<(), crate::Error> {
     if received != expected {
         Err(crate::Error::Inconsistent)
     } else {
+        Ok(())
+    }
+}
+
+#[must_use]
+fn checked_clone(dst: &mut [u8], src: &[u8]) -> Result<(), crate::Error> {
+    if dst.len() != src.len() {
+        Err(crate::Error::Inconsistent)
+    } else {
+        dst.clone_from_slice(src);
         Ok(())
     }
 }
