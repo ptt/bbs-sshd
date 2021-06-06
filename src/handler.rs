@@ -14,38 +14,26 @@ use thrussh::server;
 use thrussh::server::{Auth, Handle, Session};
 use thrussh::ChannelId;
 use tokio::net::UnixStream;
+use tokio::sync::mpsc;
 
 struct TelnetHandler {
-    ssh: Handle,
-    channel: ChannelId,
+    tx: mpsc::Sender<Vec<u8>>,
 }
 
 impl TelnetHandler {
-    fn new(handle: Handle, channel: ChannelId) -> Self {
-        TelnetHandler {
-            ssh: handle,
-            channel,
-        }
+    fn new(tx: mpsc::Sender<Vec<u8>>) -> Self {
+        TelnetHandler { tx }
     }
 
     async fn send_data(
-        mut self,
+        self,
         remote: telnet::Remote,
-        data: thrussh::CryptoVec,
+        data: Vec<u8>,
     ) -> io::Result<(Self, telnet::Remote)> {
-        match self.ssh.data(self.channel, data).await {
+        match self.tx.send(data).await {
             Ok(_) => Ok((self, remote)),
-            Err(e) => {
-                trace!("send_data: error {:?}", e);
-                Err(io::Error::from(io::ErrorKind::ConnectionReset))
-            }
+            Err(_) => Err(io::Error::from(io::ErrorKind::ConnectionReset)),
         }
-    }
-
-    async fn send_eof(mut self, remote: telnet::Remote) -> io::Result<(Self, telnet::Remote)> {
-        _ = self.ssh.eof(self.channel).await;
-        _ = self.ssh.close(self.channel).await;
-        Ok((self, remote))
     }
 }
 
@@ -68,12 +56,24 @@ impl telnet::Handler for TelnetHandler {
     }
 
     fn data(self, remote: telnet::Remote, data: &[u8]) -> Self::FutureUnit {
-        self.send_data(remote, data.to_vec().into()).boxed()
+        self.send_data(remote, data.to_vec()).boxed()
     }
+}
 
-    fn eof(self, remote: telnet::Remote) -> Self::FutureUnit {
-        self.send_eof(remote).boxed()
+async fn ssh_writer(
+    mut rx: mpsc::Receiver<Vec<u8>>,
+    mut ssh: Handle,
+    channel: ChannelId,
+) -> io::Result<()> {
+    while let Some(data) = rx.recv().await {
+        if let Err(e) = ssh.data(channel, data.into()).await {
+            trace!("send_data: error {:?}", e);
+            return Err(io::Error::from(io::ErrorKind::ConnectionReset));
+        }
     }
+    _ = ssh.eof(channel).await;
+    _ = ssh.close(channel).await;
+    Ok(())
 }
 
 pub(crate) struct Handler {
@@ -136,14 +136,16 @@ impl Handler {
         };
         Self::send_to_conn(&conn, conn_data.serialize().unwrap()).await?;
 
+        let (tx, rx) = mpsc::channel(4);
+        tokio::spawn(ssh_writer(rx, session.handle(), channel));
+
         let (read_half, write_half) = conn.into_split();
 
         self.telnet = Some(telnet::Telnet::new(1024));
-        self.telnet.as_mut().unwrap().start(
-            read_half,
-            write_half,
-            TelnetHandler::new(session.handle(), channel),
-        );
+        self.telnet
+            .as_mut()
+            .unwrap()
+            .start(read_half, write_half, TelnetHandler::new(tx));
 
         Ok((self, session))
     }
