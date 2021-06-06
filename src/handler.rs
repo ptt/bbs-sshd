@@ -16,6 +16,18 @@ use thrussh::ChannelId;
 use tokio::net::UnixStream;
 use tokio::sync::mpsc;
 
+#[derive(Clone, Copy, Debug)]
+struct WindowSize {
+    pub cols: u16,
+    pub rows: u16,
+}
+
+impl WindowSize {
+    pub fn new() -> Self {
+        WindowSize { cols: 80, rows: 24 }
+    }
+}
+
 struct TelnetHandler {
     tx: mpsc::Sender<Vec<u8>>,
 }
@@ -80,6 +92,7 @@ pub(crate) struct Handler {
     addr: SocketAddr,
     encoding: u32,
     lport: u16,
+    window_size: WindowSize,
     logind_path: Arc<PathBuf>,
     telnet: Option<telnet::Telnet>,
     channel: Option<ChannelId>,
@@ -101,6 +114,7 @@ impl Handler {
             addr: client_addr,
             encoding: logind::ConnData::CONV_NORMAL,
             lport,
+            window_size: WindowSize::new(),
             logind_path,
             telnet: None,
             channel: None,
@@ -126,6 +140,15 @@ impl Handler {
         session: Session,
         channel: ChannelId,
     ) -> Result<(Self, Session), thrussh::Error> {
+        if self.telnet.is_some() {
+            warn!(
+                "[client {}] Ignored client request to start another connection",
+                self.addr
+            );
+            return Ok((self, session));
+        }
+        info!("[client {}] Opened a connection to logind", self.addr);
+
         let conn = UnixStream::connect(self.logind_path.as_ref()).await?;
 
         let conn_data = logind::ConnData {
@@ -147,25 +170,31 @@ impl Handler {
             .unwrap()
             .start(read_half, write_half, TelnetHandler::new(tx));
 
-        Ok((self, session))
+        let ws = self.window_size;
+        self.send_window_size(session, ws.cols as u32, ws.rows as u32)
+            .await
     }
 
     async fn send_window_size(
-        self,
+        mut self,
         session: Session,
         cols: u32,
         rows: u32,
     ) -> Result<(Self, Session), thrussh::Error> {
+        let cols = cmp::min(cmp::max(cols, u16::MIN as u32), u16::MAX as u32) as u16;
+        let rows = cmp::min(cmp::max(rows, u16::MIN as u32), u16::MAX as u32) as u16;
+        self.window_size = WindowSize { cols, rows };
         if let Some(telnet) = &self.telnet {
-            let cols = cmp::min(cmp::max(cols, u16::MIN as u32), u16::MAX as u32) as u16;
-            let rows = cmp::min(cmp::max(rows, u16::MIN as u32), u16::MAX as u32) as u16;
             let mut neg = [0; 4];
             neg[..2].copy_from_slice(&cols.to_be_bytes());
             neg[2..].copy_from_slice(&rows.to_be_bytes());
             telnet
                 .remote()
                 .subnegotiate(telnet::byte::NAWS, neg.into())
-                .await?
+                .await?;
+            debug!("Sent new window size: {:?}", self.window_size);
+        } else {
+            debug!("Recorded new window size: {:?}", self.window_size);
         }
         Ok((self, session))
     }
@@ -195,7 +224,7 @@ impl Handler {
     }
 
     fn check_channel(&self, channel: ChannelId) -> bool {
-        self.channel.is_some() && self.channel.unwrap() == channel
+        self.channel == Some(channel)
     }
 
     fn wrong_channel() -> <Self as server::Handler>::FutureUnit {
@@ -277,7 +306,7 @@ impl server::Handler for Handler {
                 },
             )))
         } else {
-            info!("Rejected auth from {} with user {}", self.addr, user);
+            info!("[client {}] Rejected auth: user {}", self.addr, user);
             self.auth_reject()
         }
     }
@@ -292,18 +321,17 @@ impl server::Handler for Handler {
                 "[client {}] channel_open_session: there is already an existing channel",
                 self.addr
             );
-            session.channel_failure(channel);
+            session.close(channel);
             self.finished(session)
         } else {
             debug!("[client {}] channel_open_session: opened", self.addr);
             info!(
-                "Session opened for {}, encoding {}",
+                "[client {}] Session opened: encoding {}",
                 self.addr,
                 logind::encoding_name(self.encoding)
             );
-            session.channel_success(channel);
             self.channel = Some(channel);
-            self.start_conn(session, channel).boxed()
+            self.finished(session)
         }
     }
 
@@ -316,17 +344,53 @@ impl server::Handler for Handler {
         pix_width: u32,
         pix_height: u32,
         modes: &[(thrussh::Pty, u32)],
-        session: Session,
+        mut session: Session,
+    ) -> Self::FutureUnit {
+        info!(
+            "[client {}] pty_request: term {}, {} cols {} rows",
+            self.addr, term, col_width, row_height,
+        );
+        debug!(
+            "[client {}] pty_request: pix w {} h {}, modes: {:?}",
+            self.addr, pix_width, pix_height, modes
+        );
+        if !self.check_channel(channel) {
+            session.channel_failure(channel);
+            return Self::wrong_channel();
+        }
+        session.channel_success(channel);
+        self.send_window_size(session, col_width, row_height)
+            .boxed()
+    }
+
+    fn shell_request(self, channel: ChannelId, mut session: Session) -> Self::FutureUnit {
+        debug!("[client {}] shell_request", self.addr);
+        if !self.check_channel(channel) {
+            session.channel_failure(channel);
+            return Self::wrong_channel();
+        }
+        session.channel_success(channel);
+        self.start_conn(session, channel).boxed()
+    }
+
+    fn exec_request(
+        self,
+        channel: ChannelId,
+        data: &[u8],
+        mut session: Session,
     ) -> Self::FutureUnit {
         debug!(
-            "[client {}] pty_request: term {}, {} cols {} rows, pix w {} h {}, modes: {:?}",
-            self.addr, term, col_width, row_height, pix_width, pix_height, modes
+            "[client {}] exec_request: data = {}",
+            self.addr,
+            String::from_utf8_lossy(data)
         );
+        session.channel_failure(channel);
         if !self.check_channel(channel) {
             return Self::wrong_channel();
         }
-        self.send_window_size(session, col_width, row_height)
-            .boxed()
+        warn!("[client {}] exec_request: Rejected", self.addr);
+        session.close(channel);
+        self.finished(session)
     }
 
     fn window_change_request(
@@ -336,15 +400,17 @@ impl server::Handler for Handler {
         row_height: u32,
         pix_width: u32,
         pix_height: u32,
-        session: Session,
+        mut session: Session,
     ) -> Self::FutureUnit {
         debug!(
             "[client {}] window_change_request: {} cols {} rows, pix w {} h {}",
             self.addr, col_width, row_height, pix_width, pix_height
         );
         if !self.check_channel(channel) {
+            session.channel_failure(channel);
             return Self::wrong_channel();
         }
+        session.channel_success(channel);
         self.send_window_size(session, col_width, row_height)
             .boxed()
     }
