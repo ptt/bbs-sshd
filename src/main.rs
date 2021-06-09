@@ -197,6 +197,16 @@ fn main() {
     .expect("failed to parse config file");
 
     let sshcfg = make_ssh_config(&cfg);
+
+    if let Some(nofile) = cfg.nofile {
+        rlimit::setrlimit(
+            rlimit::Resource::NOFILE,
+            rlimit::Rlim::from_usize(nofile),
+            rlimit::Rlim::from_usize(nofile),
+        )
+        .expect("unable to set nofile limit");
+    }
+
     let listeners = bind_ports(&cfg);
 
     drop_privileges(&cfg);

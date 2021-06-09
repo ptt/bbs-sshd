@@ -69,6 +69,7 @@ dependencies = [
  "nix",
  "openssl",
  "proctitle",
+ "rlimit",
  "serde",
  "serde_derive",
  "socket2",
@@ -665,6 +666,15 @@ checksum = "528532f3d801c87aec9def2add9ca802fe569e44a544afe633765267840abe64"
 dependencies = [
  "getrandom",
  "redox_syscall",
+]
+
+[[package]]
+name = "rlimit"
+version = "0.5.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "81a9ed03edbed449d6897c2092c71ab5f7b5fb80f6f0b1a3ed6d40a6f9fc0720"
+dependencies = [
+ "libc",
 ]
 
 [[package]]
