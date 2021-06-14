@@ -727,7 +727,7 @@ impl Session {
                         Ok(s)
                     }
                     x => {
-                        warn!("unknown channel request {}", String::from_utf8_lossy(x));
+                        debug!("unknown channel request {}", String::from_utf8_lossy(x));
                         self.channel_failure(channel_num);
                         Ok(self)
                     }
