@@ -12,7 +12,7 @@ use std::pin::Pin;
 use std::sync::Arc;
 use thrussh::server;
 use thrussh::server::{Auth, Handle, Session};
-use thrussh::ChannelId;
+use thrussh::{ChannelId, CryptoVec};
 use tokio::net::UnixStream;
 use tokio::sync::mpsc;
 
@@ -29,18 +29,18 @@ impl WindowSize {
 }
 
 struct TelnetHandler {
-    tx: mpsc::Sender<Vec<u8>>,
+    tx: mpsc::Sender<CryptoVec>,
 }
 
 impl TelnetHandler {
-    fn new(tx: mpsc::Sender<Vec<u8>>) -> Self {
+    fn new(tx: mpsc::Sender<CryptoVec>) -> Self {
         TelnetHandler { tx }
     }
 
     async fn send_data(
         self,
         remote: telnet::Remote,
-        data: Vec<u8>,
+        data: CryptoVec,
     ) -> io::Result<(Self, telnet::Remote)> {
         match self.tx.send(data).await {
             Ok(_) => Ok((self, remote)),
@@ -68,17 +68,17 @@ impl telnet::Handler for TelnetHandler {
     }
 
     fn data(self, remote: telnet::Remote, data: &[u8]) -> Self::FutureUnit {
-        self.send_data(remote, data.to_vec()).boxed()
+        self.send_data(remote, CryptoVec::from_slice(data)).boxed()
     }
 }
 
 async fn ssh_writer(
-    mut rx: mpsc::Receiver<Vec<u8>>,
+    mut rx: mpsc::Receiver<CryptoVec>,
     mut ssh: Handle,
     channel: ChannelId,
 ) -> io::Result<()> {
     while let Some(data) = rx.recv().await {
-        if let Err(e) = ssh.data(channel, data.into()).await {
+        if let Err(e) = ssh.data(channel, data).await {
             trace!("send_data: error {:?}", e);
             return Err(io::Error::from(io::ErrorKind::ConnectionReset));
         }
