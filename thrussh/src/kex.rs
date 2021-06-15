@@ -82,7 +82,6 @@ pub const DH_GROUP14_SHA1: Name = Name("diffie-hellman-group14-sha1");
 pub const DH_GROUP14_SHA256: Name = Name("diffie-hellman-group14-sha256");
 
 thread_local! {
-    static KEY_BUF: RefCell<CryptoVec> = RefCell::new(CryptoVec::new());
     static BUFFER: RefCell<CryptoVec> = RefCell::new(CryptoVec::new());
 }
 
@@ -428,43 +427,47 @@ pub struct ComputeKeys<'a> {
 }
 
 impl ComputeKeys<'_> {
-    pub fn iv(&self, len: usize) -> Result<Vec<u8>, crate::Error> {
-        self.compute_keys(self.c_iv_enc_int.0, len)
+    pub fn iv<const N: usize>(&self) -> Result<[u8; N], crate::Error> {
+        self.compute_keys::<N>(self.c_iv_enc_int.0)
     }
 
-    pub fn encryption_key(&self, len: usize) -> Result<Vec<u8>, crate::Error> {
-        self.compute_keys(self.c_iv_enc_int.1, len)
+    pub fn encryption_key<const N: usize>(&self) -> Result<[u8; N], crate::Error> {
+        self.compute_keys::<N>(self.c_iv_enc_int.1)
     }
 
-    pub fn integrity_key(&self, len: usize) -> Result<Vec<u8>, crate::Error> {
-        self.compute_keys(self.c_iv_enc_int.2, len)
+    pub fn integrity_key<const N: usize>(&self) -> Result<[u8; N], crate::Error> {
+        self.compute_keys::<N>(self.c_iv_enc_int.2)
     }
 
-    fn compute_keys(&self, c: u8, len: usize) -> Result<Vec<u8>, crate::Error> {
-        KEY_BUF.with(|key| {
-            let mut key = key.borrow_mut();
-            key.clear();
-            BUFFER.with(|buffer| {
-                let mut buffer = buffer.borrow_mut();
+    fn compute_keys<const N: usize>(&self, c: u8) -> Result<[u8; N], crate::Error> {
+        let mut out = [0; N];
+        let mut n = 0;
+        BUFFER.with(|buffer| {
+            let mut buffer = buffer.borrow_mut();
+            buffer.clear();
+            buffer.extend_ssh_mpint(&self.shared_secret);
+            buffer.extend(self.exchange_hash);
+            buffer.push(c);
+            buffer.extend(self.session_id);
+            use openssl::hash::*;
+            n += Self::truncated_copy(&mut out, &hash(self.digest.clone(), &buffer)?);
+
+            while n < out.len() {
+                // extend.
                 buffer.clear();
                 buffer.extend_ssh_mpint(&self.shared_secret);
                 buffer.extend(self.exchange_hash);
-                buffer.push(c);
-                buffer.extend(self.session_id);
-                use openssl::hash::*;
-                key.extend(&hash(self.digest.clone(), &buffer)?);
-
-                while key.len() < len {
-                    // extend.
-                    buffer.clear();
-                    buffer.extend_ssh_mpint(&self.shared_secret);
-                    buffer.extend(self.exchange_hash);
-                    buffer.extend(&key);
-                    key.extend(&hash(self.digest.clone(), &buffer)?);
-                }
-                Ok(key[..len].to_vec())
-            })
+                buffer.extend(&out[..n]);
+                n += Self::truncated_copy(&mut out[n..], &hash(self.digest.clone(), &buffer)?);
+            }
+            Ok(out)
         })
+    }
+
+    fn truncated_copy(dst: &mut [u8], src: &[u8]) -> usize {
+        let n = std::cmp::min(dst.len(), src.len());
+        dst[..n].copy_from_slice(&src[..n]);
+        n
     }
 }
 

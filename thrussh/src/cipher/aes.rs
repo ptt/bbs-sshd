@@ -18,12 +18,8 @@ impl Cipher {
     fn new_from_name(name: Name, keys: &ComputeKeys) -> Result<Self, Error> {
         use aes::NewBlockCipher;
         match name {
-            AES128_CTR_NAME => Ok(Cipher::Aes128(
-                Aes128::new_from_slice(&keys.encryption_key(16)?).unwrap(),
-            )),
-            AES256_CTR_NAME => Ok(Cipher::Aes256(
-                Aes256::new_from_slice(&keys.encryption_key(32)?).unwrap(),
-            )),
+            AES128_CTR_NAME => Ok(Cipher::Aes128(Aes128::new(&keys.encryption_key()?.into()))),
+            AES256_CTR_NAME => Ok(Cipher::Aes256(Aes256::new(&keys.encryption_key()?.into()))),
             _ => Err(Error::NoCommonCipher),
         }
     }
@@ -50,8 +46,7 @@ impl CounterState {
         keys: &ComputeKeys,
         auth: Option<Auth>,
     ) -> Result<Self, Error> {
-        use std::convert::TryInto;
-        let counter = u128::from_be_bytes(keys.iv(BLOCK_LEN)?.try_into().unwrap());
+        let counter = u128::from_be_bytes(keys.iv()?);
         Ok(CounterState {
             cipher: Cipher::new_from_name(name, keys)?,
             counter: Mutex::new(counter),

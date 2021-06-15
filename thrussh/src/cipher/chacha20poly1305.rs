@@ -34,7 +34,7 @@ const TAG_LEN: usize = 16;
 pub const NAME: super::Name = super::Name("chacha20-poly1305@openssh.com");
 
 pub fn make_sealing_cipher(keys: &ComputeKeys) -> Result<super::SealingCipher, Error> {
-    let k = keys.encryption_key(KEY_BYTES * 2)?;
+    let k = keys.encryption_key::<{ KEY_BYTES * 2 }>()?;
     let mut k1 = Key([0; KEY_BYTES]);
     let mut k2 = Key([0; KEY_BYTES]);
     k1.0.clone_from_slice(&k[KEY_BYTES..]);
@@ -46,7 +46,7 @@ pub fn make_sealing_cipher(keys: &ComputeKeys) -> Result<super::SealingCipher, E
 }
 
 pub fn make_opening_cipher(keys: &ComputeKeys) -> Result<super::OpeningCipher, Error> {
-    let k = keys.encryption_key(KEY_BYTES * 2)?;
+    let k = keys.encryption_key::<{ KEY_BYTES * 2 }>()?;
     let mut k1 = Key([0; KEY_BYTES]);
     let mut k2 = Key([0; KEY_BYTES]);
     k1.0.clone_from_slice(&k[KEY_BYTES..]);

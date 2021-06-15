@@ -25,12 +25,11 @@ pub enum Auth {
 
 impl Auth {
     pub fn new_from_name(name: Name, keys: &ComputeKeys) -> Result<Option<Auth>, Error> {
-        use std::convert::TryInto;
         Ok(Some(match name {
             NONE => return Ok(None),
-            HMAC_SHA2_256 => Auth::HmacSha256(keys.integrity_key(32)?.try_into().unwrap()),
-            HMAC_SHA2_512 => Auth::HmacSha512(keys.integrity_key(64)?.try_into().unwrap()),
-            HMAC_SHA1 => Auth::HmacSha1(keys.integrity_key(20)?.try_into().unwrap()),
+            HMAC_SHA2_256 => Auth::HmacSha256(keys.integrity_key()?),
+            HMAC_SHA2_512 => Auth::HmacSha512(keys.integrity_key()?),
+            HMAC_SHA1 => Auth::HmacSha1(keys.integrity_key()?),
             _ => return Err(Error::NoCommonCipher),
         }))
     }
