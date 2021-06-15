@@ -1,4 +1,5 @@
 #![feature(destructuring_assignment)]
+#![feature(option_get_or_insert_default)]
 mod config;
 mod handler;
 mod logind;

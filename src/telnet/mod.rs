@@ -73,25 +73,25 @@ impl Remote {
     }
 }
 
-fn escape_iov<'a, 'b>(data: &'a [u8], iov: &'b mut Vec<IoSlice<'a>>, skip_single: bool) -> bool {
+fn escape_iov<'a>(data: &'a [u8], skip_single: bool) -> Option<Vec<IoSlice<'a>>> {
+    let mut iov: Option<Vec<IoSlice<'_>>> = None;
     let mut last = 0;
     for (i, &b) in data.iter().enumerate() {
         if b == IAC {
-            iov.push(IoSlice::new(&data[last..=i]));
+            iov.get_or_insert_default()
+                .push(IoSlice::new(&data[last..=i]));
             last = i;
         }
     }
-    if iov.len() > 0 || !skip_single {
-        iov.push(IoSlice::new(&data[last..]));
-        true
-    } else {
-        false
+    if iov.is_some() || !skip_single {
+        iov.get_or_insert_default()
+            .push(IoSlice::new(&data[last..]));
     }
+    iov
 }
 
 async fn escape_send<S: AsyncWrite + Unpin>(stream: &mut S, data: &[u8]) -> Result<usize> {
-    let mut iov = Vec::new();
-    if escape_iov(data, &mut iov, true) {
+    if let Some(iov) = escape_iov(data, true) {
         stream.write_vectored(&iov).await
     } else {
         stream.write(&data).await
@@ -106,7 +106,7 @@ async fn send_subnegotiate<S: AsyncWrite + Unpin>(
     let mut iov = Vec::new();
     let begin = vec![IAC, SB, cmd];
     iov.push(IoSlice::new(&begin));
-    _ = escape_iov(data, &mut iov, false);
+    iov.extend_from_slice(&escape_iov(data, false).unwrap());
     iov.push(IoSlice::new(&[IAC, SE]));
     stream.write_vectored(&iov).await
 }
