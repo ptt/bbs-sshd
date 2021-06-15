@@ -20,6 +20,6 @@ pub(crate) struct Config {
     // Log level. Valid values: OFF, ERROR, WARN, INFO, DEBUG, TRACE.
     // TRACE is not available in release builds.
     pub log_level: Option<LevelFilter>,
-    // Path to logind socket.
-    pub logind_path: String,
+    // List of path to logind socket.
+    pub logind_paths: Vec<String>,
 }

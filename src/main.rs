@@ -8,7 +8,7 @@ mod telnet;
 use clap::{App, Arg};
 use log::{error, info};
 use std::net::SocketAddr;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::str::FromStr;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -227,7 +227,15 @@ fn main() {
     log::set_boxed_logger(Box::new(Logger::new(logger, foreground))).unwrap();
     log::set_max_level(cfg.log_level.unwrap_or(log::LevelFilter::Info));
 
-    let logind_path = Arc::new(Path::new(&cfg.logind_path).to_path_buf());
+    let logind_paths: Vec<Arc<PathBuf>> = cfg
+        .logind_paths
+        .iter()
+        .map(|p| Arc::new(PathBuf::from(p)))
+        .collect();
+    if logind_paths.is_empty() {
+        error!("logind_paths is empty");
+        std::process::exit(1);
+    }
 
     match cfg.workers.unwrap_or(0) {
         0 => tokio::runtime::Builder::new_current_thread()
@@ -239,13 +247,13 @@ fn main() {
             .build(),
     }
     .unwrap()
-    .block_on(async move { run(sshcfg, listeners, logind_path).await });
+    .block_on(async move { run(sshcfg, listeners, logind_paths).await });
 }
 
 async fn run(
     config: thrussh::server::Config,
     listeners: Vec<std::net::TcpListener>,
-    logind_path: Arc<PathBuf>,
+    logind_paths: Vec<Arc<PathBuf>>,
 ) {
     let (tx, mut rx) = mpsc::channel(1);
     let config = Arc::new(config);
@@ -253,11 +261,12 @@ async fn run(
     proctitle::set_title("bbs-sshd: run");
     let servers: Vec<_> = listeners
         .into_iter()
-        .map(move |listener| {
+        .enumerate()
+        .map(move |(idx, listener)| {
             tokio::spawn(run_one_server(
                 config.clone(),
                 listener,
-                logind_path.clone(),
+                PathPicker::new(logind_paths.clone(), idx),
                 tx.clone(),
             ))
         })
@@ -275,7 +284,7 @@ async fn run(
 async fn run_one_server(
     config: Arc<thrussh::server::Config>,
     listener: std::net::TcpListener,
-    logind_path: Arc<PathBuf>,
+    mut logind_paths: PathPicker,
     alive: mpsc::Sender<()>,
 ) {
     let _ = alive;
@@ -306,7 +315,7 @@ async fn run_one_server(
                 tokio::spawn(run_forward(
                     config.clone(),
                     stream,
-                    handler::Handler::new(client_addr, lport, logind_path.clone()),
+                    handler::Handler::new(client_addr, lport, logind_paths.next()),
                     alive.clone(),
                 ));
             }
@@ -322,4 +331,25 @@ async fn run_forward(
 ) {
     let _ = alive;
     let _ = thrussh::server::run_stream(config.clone(), stream, handler).await;
+}
+
+struct PathPicker {
+    paths: Vec<Arc<PathBuf>>,
+    offset: usize,
+}
+
+impl PathPicker {
+    pub fn new(paths: Vec<Arc<PathBuf>>, offset: usize) -> Self {
+        let offset = offset % paths.len();
+        PathPicker { paths, offset }
+    }
+
+    pub fn next(&mut self) -> Arc<PathBuf> {
+        let path = self.paths[self.offset].clone();
+        self.offset += 1;
+        if self.offset == self.paths.len() {
+            self.offset = 0;
+        }
+        path
+    }
 }
