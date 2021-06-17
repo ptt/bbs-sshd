@@ -308,29 +308,32 @@ async fn run_one_server(
             _ = sigterm.recv() => break,
             accepted = listener.accept() => {
                 let (stream, client_addr) = accepted.expect("unable to accept connection");
-
-                let stream =
-                    socket_linux::set_client_conn_options(stream)
-                    .expect("unable to set socket options");
-                tokio::spawn(run_forward(
+                spawn_forwarding(
                     config.clone(),
                     stream,
                     handler::Handler::new(client_addr, lport, logind_paths.next()),
                     alive.clone(),
-                ));
+                );
             }
         }
     }
 }
 
-async fn run_forward(
+fn spawn_forwarding(
     config: Arc<thrussh::server::Config>,
     stream: tokio::net::TcpStream,
     handler: handler::Handler,
     alive: mpsc::Sender<()>,
 ) {
-    let _ = alive;
-    let _ = thrussh::server::run_stream(config.clone(), stream, handler).await;
+    let stream =
+        socket_linux::set_client_conn_options(stream).expect("unable to set socket options");
+
+    use futures::FutureExt;
+    tokio::spawn(
+        thrussh::server::run_stream(config, stream, handler).map(move |_| {
+            let _ = alive;
+        }),
+    );
 }
 
 struct PathPicker {
