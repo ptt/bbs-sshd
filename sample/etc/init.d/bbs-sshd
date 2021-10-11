@@ -1,0 +1,92 @@
+#! /bin/sh
+
+### BEGIN INIT INFO
+# Provides:		bbs-sshd
+# Required-Start:	$syslog
+# Required-Stop:	$syslog
+# Default-Start:	2 3 4 5
+# Default-Stop:		
+# Short-Description:	BBS Secure Shell server
+### END INIT INFO
+
+set -e
+
+# /etc/init.d/bbs-sshd: start and stop the bbs-sshd
+
+EXE="/opt/bbs-sshd"
+CONF="/etc/bbs-sshd.toml"
+PID_FILE="/home/bbs/run/bbs-sshd.pid"
+
+test -x "$EXE" || exit 0
+
+umask 022
+
+if test -f /etc/default/bbs-sshd; then
+    . /etc/default/bbs-sshd
+fi
+
+. /lib/lsb/init-functions
+
+if [ -n "$2" ]; then
+    BBS_SSHD_OPTS="$BBS_SSHD_OPTS $2"
+fi
+
+# Are we running from init?
+run_by_init() {
+    ([ "$previous" ] && [ "$runlevel" ]) || [ "$runlevel" = S ]
+}
+
+export PATH="${PATH:+$PATH:}/usr/sbin:/sbin"
+
+case "$1" in
+  start)
+	log_daemon_msg "Starting BBS Secure Shell server" "bbs-sshd" || true
+	if start-stop-daemon --start --quiet --oknodo --chuid 0:0 --pidfile "$PID_FILE" --exec "$EXE" -- -f "$CONF"; then
+	    log_end_msg 0 || true
+	else
+	    log_end_msg 1 || true
+	fi
+	;;
+  stop)
+	log_daemon_msg "Stopping BBS Secure Shell server" "bbs-sshd" || true
+	if start-stop-daemon --stop --quiet --oknodo --pidfile "$PID_FILE" --signal QUIT --exec "$EXE"; then
+	    log_end_msg 0 || true
+	else
+	    log_end_msg 1 || true
+	fi
+	;;
+
+  reload)
+	log_daemon_msg "Gracefully restarting BBS Secure Shell server to reload configuration" "bbs-sshd" || true
+	if start-stop-daemon --stop --signal INT --quiet --oknodo --pidfile "$PID_FILE" --exec "$EXE"; then
+	    /bin/rm -f "$PID_FILE"
+	    if start-stop-daemon --start --quiet --oknodo --chuid 0:0 --pidfile "$PID_FILE" --exec "$EXE" -- -f "$CONF"; then
+		log_end_msg 0 || true
+	    else
+		log_end_msg 1 || true
+	    fi
+	else
+	    log_end_msg 1 || true
+	fi
+	;;
+
+  restart)
+	log_daemon_msg "Restarting BBS Secure Shell server" "bbs-sshd" || true
+	start-stop-daemon --stop --quiet --oknodo --retry 30 --signal QUIT --pidfile "$PID_FILE" --exec "$EXE"
+	if start-stop-daemon --start --quiet --oknodo --chuid 0:0 --pidfile "$PID_FILE" --exec "$EXE" -- -f "$CONF"; then
+	    log_end_msg 0 || true
+	else
+	    log_end_msg 1 || true
+	fi
+	;;
+
+  status)
+	status_of_proc -p "$PID_FILE" "$EXE" bbs-sshd && exit 0 || exit $?
+	;;
+
+  *)
+	log_action_msg "Usage: /etc/init.d/bbs-sshd {start|stop|reload|restart|status}" || true
+	exit 1
+esac
+
+exit 0

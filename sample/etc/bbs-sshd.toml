@@ -1,0 +1,34 @@
+# Server bind address and port.
+bind = [
+    "0.0.0.0:22",
+]
+
+# Host keys
+host_keys = [
+    "/etc/ssh/ssh_host_ed25519_key",
+    "/etc/ssh/ssh_host_ecdsa_key",
+    "/etc/ssh/ssh_host_rsa_key",
+]
+
+# Optional: Set uid. (default: no set)
+uid = 9999
+
+# Optional: Set gid. (default: no set)
+gid = 99
+
+# Optional: Number of worker threads. (default: 0, single threaded)
+workers = 4
+
+# Optional: Set max number of open files. (default: no set)
+nofile = 10000
+
+# Optional: Write pid file. (default: no pid file)
+pid_file = "/home/bbs/run/bbs-sshd.pid"
+
+# Optional: Log level. (available: ERROR, WARN, INFO, DEBUG, TRACE; default: INFO)
+#log_level = "TRACE"
+
+# Paths to logind, multiple entries supported. Round-robin.
+logind_paths = [
+    "/home/bbs/run/logind.connfwd.sock",
+]
