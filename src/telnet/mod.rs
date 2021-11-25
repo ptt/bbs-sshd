@@ -166,7 +166,9 @@ async fn run_processor<R: AsyncRead + Unpin, H: Handler>(
     loop {
         match read_half.read(&mut buf).await {
             Ok(n) => {
-                (handler, remote) = processor.process(&buf[..n], handler, remote).await?;
+                let (handler_, remote_) = processor.process(&buf[..n], handler, remote).await?;
+                handler = handler_;
+                remote = remote_;
                 if n == 0 {
                     break;
                 }

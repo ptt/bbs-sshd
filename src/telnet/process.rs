@@ -112,23 +112,32 @@ impl Processor {
             match event {
                 ProcEvent::Queue => self.queued.queue(),
                 ProcEvent::Flush => {
-                    (handler, remote) = handler.data(remote, &data[self.queued.flush()]).await?;
+                    let (handler_, remote_) =
+                        handler.data(remote, &data[self.queued.flush()]).await?;
+                    handler = handler_;
+                    remote = remote_;
                 }
                 ProcEvent::Processed => self.queued.skip(),
                 ProcEvent::Command(cmd, opt) => {
                     self.queued.skip();
-                    (handler, remote) = handler.command(remote, cmd, opt).await?;
+                    let (handler_, remote_) = handler.command(remote, cmd, opt).await?;
+                    handler = handler_;
+                    remote = remote_;
                 }
                 ProcEvent::Subnegotiation(data) => {
                     self.queued.skip();
-                    (handler, remote) = handler.subnegotiation(remote, &data).await?;
+                    let (handler_, remote_) = handler.subnegotiation(remote, &data).await?;
+                    handler = handler_;
+                    remote = remote_;
                 }
                 ProcEvent::Error => return Err(io::Error::from(io::ErrorKind::ConnectionReset)),
             }
         }
         let rest = self.queued.flush();
         if !rest.is_empty() {
-            (handler, remote) = handler.data(remote, &data[rest]).await?;
+            let (handler_, remote_) = handler.data(remote, &data[rest]).await?;
+            handler = handler_;
+            remote = remote_;
         }
         Ok((handler, remote))
     }
