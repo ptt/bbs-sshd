@@ -78,13 +78,13 @@ fn escape_iov<'a>(data: &'a [u8], skip_single: bool) -> Option<Vec<IoSlice<'a>>>
     let mut last = 0;
     for (i, &b) in data.iter().enumerate() {
         if b == IAC {
-            iov.get_or_insert_default()
+            iov.get_or_insert_with(Default::default)
                 .push(IoSlice::new(&data[last..=i]));
             last = i;
         }
     }
     if iov.is_some() || !skip_single {
-        iov.get_or_insert_default()
+        iov.get_or_insert_with(Default::default)
             .push(IoSlice::new(&data[last..]));
     }
     iov
