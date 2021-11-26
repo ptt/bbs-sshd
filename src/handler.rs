@@ -83,8 +83,8 @@ async fn ssh_writer(
             return Err(io::Error::from(io::ErrorKind::ConnectionReset));
         }
     }
-    _ = ssh.eof(channel).await;
-    _ = ssh.close(channel).await;
+    let _ = ssh.eof(channel).await;
+    let _ = ssh.close(channel).await;
     Ok(())
 }
 

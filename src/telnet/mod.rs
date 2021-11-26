@@ -78,13 +78,13 @@ fn escape_iov<'a>(data: &'a [u8], skip_single: bool) -> Option<Vec<IoSlice<'a>>>
     let mut last = 0;
     for (i, &b) in data.iter().enumerate() {
         if b == IAC {
-            iov.get_or_insert_default()
+            iov.get_or_insert_with(Default::default)
                 .push(IoSlice::new(&data[last..=i]));
             last = i;
         }
     }
     if iov.is_some() || !skip_single {
-        iov.get_or_insert_default()
+        iov.get_or_insert_with(Default::default)
             .push(IoSlice::new(&data[last..]));
     }
     iov
@@ -166,7 +166,9 @@ async fn run_processor<R: AsyncRead + Unpin, H: Handler>(
     loop {
         match read_half.read(&mut buf).await {
             Ok(n) => {
-                (handler, remote) = processor.process(&buf[..n], handler, remote).await?;
+                let (handler_, remote_) = processor.process(&buf[..n], handler, remote).await?;
+                handler = handler_;
+                remote = remote_;
                 if n == 0 {
                     break;
                 }
