@@ -1,6 +1,6 @@
 use crate::kex::ComputeKeys;
 use crate::Error;
-use hmac::{Hmac, Mac, NewMac};
+use hmac::{Hmac, Mac};
 use sha1::Sha1;
 use sha2::{Sha256, Sha512};
 

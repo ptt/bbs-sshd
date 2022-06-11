@@ -9,5 +9,5 @@ license = "Apache-2.0"
 include = ["Cargo.toml", "src/lib.rs"]
 
 [dependencies]
-libc = "0.2"
-winapi = { version = "0.3", features = ["basetsd", "minwindef", "memoryapi"] }
+libc = "0.2.126"
+winapi = { version = "0.3.9", features = ["basetsd", "minwindef", "memoryapi"] }

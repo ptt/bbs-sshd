@@ -16,7 +16,7 @@ pub enum Cipher {
 
 impl Cipher {
     fn new_from_name(name: Name, keys: &ComputeKeys) -> Result<Self, Error> {
-        use aes::NewBlockCipher;
+        use aes::cipher::KeyInit;
         match name {
             AES128_CTR_NAME => Ok(Cipher::Aes128(Aes128::new(&keys.encryption_key()?.into()))),
             AES256_CTR_NAME => Ok(Cipher::Aes256(Aes256::new(&keys.encryption_key()?.into()))),
@@ -25,7 +25,7 @@ impl Cipher {
     }
 
     fn encrypt(&self, block: &mut [u8]) {
-        use aes::BlockEncrypt;
+        use aes::cipher::BlockEncrypt;
         let arr = GenericArray::from_mut_slice(block);
         match self {
             Cipher::Aes128(c) => c.encrypt_block(arr),

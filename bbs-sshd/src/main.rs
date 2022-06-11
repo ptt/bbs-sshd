@@ -3,7 +3,6 @@ mod handler;
 mod logind;
 mod socket_linux;
 mod telnet;
-use clap::{App, Arg};
 use log::{error, info};
 use std::net::SocketAddr;
 use std::path::PathBuf;
@@ -38,11 +37,22 @@ impl log::Log for Logger {
     }
 
     fn log(&self, record: &log::Record) {
+        use time::format_description::well_known::Rfc3339;
+
         if self.enabled(record.metadata()) {
             let mut under = self.under.lock().unwrap();
             let message = format!("{} ({}) {}", record.level(), record.target(), record.args());
             if self.also_stderr {
-                eprintln!("{} {}", time::now().strftime("%b %d %T").unwrap(), message);
+                eprintln!(
+                    "{} {}",
+                    time::OffsetDateTime::now_utc()
+                        // Truncate to seconds.
+                        .replace_microsecond(0)
+                        .unwrap()
+                        .format(&Rfc3339)
+                        .unwrap(),
+                    message
+                );
             }
             let _ = match record.level() {
                 log::Level::Error => under.err(message),
@@ -165,21 +175,22 @@ fn bind_ports(cfg: &config::Config) -> Vec<std::net::TcpListener> {
 }
 
 fn main() {
-    let matches = App::new("BBS SSH Daemon")
+    use clap::{Arg, Command};
+    let matches = Command::new("BBS SSH Daemon")
         .version(clap::crate_version!())
         .author(clap::crate_authors!())
         .about("Specialized SSH daemon to bridge ssh client to logind.")
         .arg(
-            Arg::with_name(FLAG_CONFIG_FILE)
-                .short("f")
+            Arg::new(FLAG_CONFIG_FILE)
+                .short('f')
                 .help("Config file path")
                 .takes_value(true)
                 .value_name("FILE")
                 .required(true),
         )
         .arg(
-            Arg::with_name(FLAG_NO_DEAMON)
-                .short("D")
+            Arg::new(FLAG_NO_DEAMON)
+                .short('D')
                 .help("Do not daemonize; PID file will not be written"),
         )
         .after_help(
@@ -198,12 +209,8 @@ fn main() {
     let sshcfg = make_ssh_config(&cfg);
 
     if let Some(nofile) = cfg.nofile {
-        rlimit::setrlimit(
-            rlimit::Resource::NOFILE,
-            rlimit::Rlim::from_usize(nofile),
-            rlimit::Rlim::from_usize(nofile),
-        )
-        .expect("unable to set nofile limit");
+        rlimit::setrlimit(rlimit::Resource::NOFILE, nofile as u64, nofile as u64)
+            .expect("unable to set nofile limit");
     }
 
     let listeners = bind_ports(&cfg);
@@ -219,7 +226,7 @@ fn main() {
         facility: Facility::LOG_LOCAL0,
         hostname: None,
         process: "bbs-sshd".into(),
-        pid: std::process::id() as i32,
+        pid: std::process::id(),
     })
     .expect("unable to start logging");
     log::set_boxed_logger(Box::new(Logger::new(logger, foreground))).unwrap();

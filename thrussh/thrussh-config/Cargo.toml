@@ -10,9 +10,9 @@ repository = "https://nest.pijul.com/pijul/thrussh"
 edition = "2018"
 
 [dependencies]
-log = "0.4"
-dirs-next = "2.0"
-tokio = { version = "1.0", features = [ "io-util", "net", "macros", "process" ] }
-futures = "0.3"
-thiserror = "1.0"
-whoami = "1.0"
+log = "0.4.17"
+dirs-next = "2.0.0"
+tokio = { version = "1.19.2", features = [ "io-util", "net", "macros", "process" ] }
+futures = "0.3.21"
+thiserror = "1.0.31"
+whoami = "1.2.1"
