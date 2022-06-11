@@ -1,28 +1,10 @@
-[package]
-name = "bbs-sshd"
-version = "0.1.0"
-edition = "2018"
+[workspace]
 
-# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+members = [ "bbs-sshd", "thrussh/thrussh-keys", "thrussh/thrussh", "thrussh/thrussh-libsodium", "thrussh/thrussh-config", "thrussh/cryptovec" ]
 
-[dependencies]
-bytes = "1.0.1"
-futures = "0.3.15"
+[patch.crates-io]
 thrussh = { path = "thrussh/thrussh" }
 thrussh-keys = { path = "thrussh/thrussh-keys" }
-tokio = { version = "1.6.0", features = ["signal", "time"] }
-libc = "0.2.94"
-socket2 = { version = "0.4.0", features = ["all"] }
-log = { version = "0.4.14", features = ["serde", "release_max_level_trace"] }
-openssl = { version = "0.10.34", features = ["vendored"] }
-ssh-keys = "0.1.4"
-syslog = "5.0.0"
-fork = "0.1.18"
-nix = "0.21.0"
-clap = "2.33.3"
-toml = "0.5.8"
-serde = "1.0.126"
-serde_derive = "1.0.126"
-proctitle = "0.1.1"
-time = "0.1.44"
-rlimit = "0.5.4"
+thrussh-libsodium = { path = "thrussh/thrussh-libsodium" }
+cryptovec = { path = "thrussh/cryptovec" }
+thrussh-config = { path = "thrussh/thrussh-config" }
