@@ -11,5 +11,5 @@ with import "${src.out}/rust-overlay.nix" pkgs pkgs;
 
 stdenv.mkDerivation {
   name = "rust-pijul";
-  buildInputs = [ rustChannels.stable.rust libsodium pkgconfig ];
+  buildInputs = [ rustChannels.stable.rust pkgconfig ];
 }

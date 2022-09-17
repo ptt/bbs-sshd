@@ -273,7 +273,6 @@
 extern crate bitflags;
 #[macro_use]
 extern crate log;
-extern crate thrussh_libsodium as sodium;
 #[macro_use]
 extern crate thiserror;
 
