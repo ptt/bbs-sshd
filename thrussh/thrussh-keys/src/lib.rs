@@ -52,8 +52,6 @@
 //! }
 //!```
 
-#![recursion_limit = "128"]
-extern crate thrussh_libsodium as sodium;
 #[macro_use]
 extern crate serde_derive;
 #[macro_use]
@@ -72,6 +70,7 @@ use std::io::{BufRead, BufReader, Read, Seek, SeekFrom, Write};
 use std::path::Path;
 
 pub mod ec;
+pub mod ed25519;
 pub mod encoding;
 pub mod key;
 pub mod signature;
@@ -117,6 +116,8 @@ pub enum Error {
     AgentFailure,
     #[error("Invalid signature")]
     InvalidSignature,
+    #[error("Invalid key")]
+    InvalidKey,
     #[error(transparent)]
     IO(#[from] std::io::Error),
     #[error(transparent)]
@@ -196,11 +197,11 @@ impl PublicKeyBase64 for key::PublicKey {
         match *self {
             key::PublicKey::Ed25519(ref publickey) => {
                 let name = b"ssh-ed25519";
+                let key = publickey.as_bytes().as_slice();
                 s.write_u32::<BigEndian>(name.len() as u32).unwrap();
                 s.extend_from_slice(name);
-                s.write_u32::<BigEndian>(publickey.key.len() as u32)
-                    .unwrap();
-                s.extend_from_slice(&publickey.key);
+                s.write_u32::<BigEndian>(key.len() as u32).unwrap();
+                s.extend_from_slice(key);
             }
             key::PublicKey::RSA { ref key, .. } => {
                 use encoding::Encoding;
@@ -227,9 +228,9 @@ impl PublicKeyBase64 for key::KeyPair {
         match *self {
             key::KeyPair::Ed25519(ref key) => {
                 s.extend_ssh_string(self.name().as_bytes());
-                let public = &key.key[32..];
+                let public = key.public_as_bytes();
                 s.write_u32::<BigEndian>(32).unwrap();
-                s.extend_from_slice(&public);
+                s.extend_from_slice(public.as_slice());
             }
             key::KeyPair::RSA { ref key, .. } => {
                 use rsa::PublicKeyParts;

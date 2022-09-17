@@ -36,9 +36,7 @@ pub fn decode_openssh(secret: &[u8], password: Option<&[u8]>) -> Result<key::Key
                 let seckey = position.read_string()?;
                 let _comment = position.read_string()?;
                 assert_eq!(pubkey, &seckey[32..]);
-                use key::ed25519::*;
-                let mut secret = SecretKey::new_zeroed();
-                secret.key.clone_from_slice(seckey);
+                let secret = crate::ed25519::SecretKey::from_bytes(seckey)?;
                 return Ok(key::KeyPair::Ed25519(secret));
             } else if key_type == crate::KEYTYPE_RSA {
                 let n = BigUint::from_bytes_be(position.read_string()?);

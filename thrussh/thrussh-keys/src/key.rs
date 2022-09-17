@@ -18,11 +18,6 @@ pub use crate::signature::*;
 use crate::Error;
 use cryptovec::CryptoVec;
 
-/// Keys for elliptic curve Ed25519 cryptography.
-pub mod ed25519 {
-    pub use sodium::ed25519::{keypair, sign_detached, verify_detached, PublicKey, SecretKey};
-}
-
 #[derive(Debug, PartialEq, Eq, Copy, Clone)]
 /// Name of a public key algorithm.
 pub struct Name(pub &'static str);
@@ -109,7 +104,7 @@ impl SignatureHash {
 #[derive(Eq, PartialEq, Debug)]
 pub enum PublicKey {
     #[doc(hidden)]
-    Ed25519(sodium::ed25519::PublicKey),
+    Ed25519(crate::ed25519::PublicKey),
     #[doc(hidden)]
     RSA {
         key: rsa::RsaPublicKey,
@@ -127,14 +122,11 @@ impl PublicKey {
                 let mut p = pubkey.reader(0);
                 let key_algo = p.read_string()?;
                 let key_bytes = p.read_string()?;
-                if key_algo != b"ssh-ed25519" || key_bytes.len() != sodium::ed25519::PUBLICKEY_BYTES
+                if key_algo != b"ssh-ed25519" || key_bytes.len() != crate::ed25519::PUBLICKEY_BYTES
                 {
                     return Err(Error::CouldNotReadKey.into());
                 }
-                let mut p = sodium::ed25519::PublicKey {
-                    key: [0; sodium::ed25519::PUBLICKEY_BYTES],
-                };
-                p.key.clone_from_slice(key_bytes);
+                let p = crate::ed25519::PublicKey::from_bytes(key_bytes)?;
                 Ok(PublicKey::Ed25519(p))
             }
             b"ssh-rsa" | b"rsa-sha2-256" | b"rsa-sha2-512" => {
@@ -179,7 +171,7 @@ impl PublicKey {
     pub fn verify_detached(&self, buffer: &[u8], sig: &[u8]) -> bool {
         match self {
             &PublicKey::Ed25519(ref public) => {
-                sodium::ed25519::verify_detached(&sig, buffer, &public)
+                crate::ed25519::verify_detached(&sig, buffer, &public)
             }
             &PublicKey::RSA { ref key, ref hash } => {
                 use rsa::PublicKey;
@@ -229,7 +221,7 @@ impl Verify for PublicKey {
 
 /// Public key exchange algorithms.
 pub enum KeyPair {
-    Ed25519(sodium::ed25519::SecretKey),
+    Ed25519(crate::ed25519::SecretKey),
     RSA {
         key: rsa::RsaPrivateKey,
         hash: SignatureHash,
@@ -245,7 +237,7 @@ impl std::fmt::Debug for KeyPair {
             KeyPair::Ed25519(ref key) => write!(
                 f,
                 "Ed25519 {{ public: {:?}, secret: (hidden) }}",
-                &key.key[32..]
+                key.public_as_bytes()
             ),
             KeyPair::RSA { .. } => write!(f, "RSA {{ (hidden) }}"),
             KeyPair::Ec { ref key } => write!(f, "Ec {{ key: {:?} }}", key),
@@ -263,11 +255,7 @@ impl KeyPair {
     /// Copy the public key of this algorithm.
     pub fn clone_public_key(&self) -> PublicKey {
         match self {
-            &KeyPair::Ed25519(ref key) => {
-                let mut public = sodium::ed25519::PublicKey { key: [0; 32] };
-                public.key.clone_from_slice(&key.key[32..]);
-                PublicKey::Ed25519(public)
-            }
+            &KeyPair::Ed25519(ref key) => PublicKey::Ed25519(key.to_public_key()),
             &KeyPair::RSA { ref key, ref hash } => PublicKey::RSA {
                 key: key.to_public_key(),
                 hash: hash.clone(),
@@ -289,9 +277,7 @@ impl KeyPair {
 
     /// Generate a key pair.
     pub fn generate_ed25519() -> Option<Self> {
-        let (public, secret) = sodium::ed25519::keypair();
-        assert_eq!(&public.key, &secret.key[32..]);
-        Some(KeyPair::Ed25519(secret))
+        Some(KeyPair::Ed25519(crate::ed25519::keypair()))
     }
 
     pub fn generate_rsa(bits: usize, hash: SignatureHash) -> Option<Self> {
@@ -303,7 +289,7 @@ impl KeyPair {
     pub fn sign_detached(&self, to_sign: &[u8]) -> Result<Signature, Error> {
         match self {
             &KeyPair::Ed25519(ref secret) => Ok(Signature::Ed25519(SignatureBytes(
-                sodium::ed25519::sign_detached(to_sign.as_ref(), secret).0,
+                crate::ed25519::sign_detached(to_sign.as_ref(), secret).0,
             ))),
             &KeyPair::RSA { ref key, ref hash } => Ok(Signature::RSA {
                 bytes: rsa_signature(hash, key, to_sign.as_ref())?,
@@ -327,7 +313,7 @@ impl KeyPair {
     ) -> Result<(), Error> {
         match self {
             &KeyPair::Ed25519(ref secret) => {
-                let signature = sodium::ed25519::sign_detached(to_sign.as_ref(), secret);
+                let signature = crate::ed25519::sign_detached(to_sign.as_ref(), secret);
 
                 buffer.push_u32_be((ED25519.0.len() + signature.0.len() + 8) as u32);
                 buffer.extend_ssh_string(ED25519.0.as_bytes());
@@ -359,7 +345,7 @@ impl KeyPair {
     pub fn add_self_signature(&self, buffer: &mut CryptoVec) -> Result<(), Error> {
         match self {
             &KeyPair::Ed25519(ref secret) => {
-                let signature = sodium::ed25519::sign_detached(&buffer, secret);
+                let signature = crate::ed25519::sign_detached(&buffer, secret);
                 buffer.push_u32_be((ED25519.0.len() + signature.0.len() + 8) as u32);
                 buffer.extend_ssh_string(ED25519.0.as_bytes());
                 buffer.extend_ssh_string(&signature.0);
@@ -417,11 +403,7 @@ pub fn parse_public_key(p: &[u8]) -> Result<PublicKey, Error> {
     let t = pos.read_string()?;
     if t == crate::KEYTYPE_ED25519 {
         if let Ok(pubkey) = pos.read_string() {
-            use sodium::ed25519;
-            let mut p = ed25519::PublicKey {
-                key: [0; ed25519::PUBLICKEY_BYTES],
-            };
-            p.key.clone_from_slice(pubkey);
+            let p = crate::ed25519::PublicKey::from_bytes(pubkey)?;
             return Ok(PublicKey::Ed25519(p));
         }
     }

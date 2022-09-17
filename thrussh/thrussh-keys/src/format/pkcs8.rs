@@ -113,7 +113,7 @@ fn asn1_read_aes256cbc(
     Ok(Ok(Encryption::Aes256Cbc(i)))
 }
 
-fn write_key_v1(writer: &mut yasna::DERWriterSeq, secret: &key::ed25519::SecretKey) {
+fn write_key_v1(writer: &mut yasna::DERWriterSeq, secret: &crate::ed25519::SecretKey) {
     writer.next().write_u32(1);
     // write OID
     writer.next().write_sequence(|writer| {
@@ -121,13 +121,13 @@ fn write_key_v1(writer: &mut yasna::DERWriterSeq, secret: &key::ed25519::SecretK
             .next()
             .write_oid(&ObjectIdentifier::from_slice(ED25519));
     });
-    let seed = yasna::construct_der(|writer| writer.write_bytes(&secret.key));
+    let seed = yasna::construct_der(|writer| writer.write_bytes(&secret.to_bytes()));
     writer.next().write_bytes(&seed);
     writer
         .next()
         .write_tagged(yasna::Tag::context(1), |writer| {
-            let public = &secret.key[32..];
-            writer.write_bitvec(&BitVec::from_bytes(&public))
+            let public = secret.public_as_bytes().as_slice();
+            writer.write_bitvec(&BitVec::from_bytes(public))
         })
 }
 
@@ -136,21 +136,17 @@ fn read_key_v1(reader: &mut BERReaderSeq) -> Result<key::KeyPair, Error> {
         .next()
         .read_sequence(|reader| reader.next().read_oid())?;
     if oid.components().as_slice() == ED25519 {
-        use key::ed25519::{PublicKey, SecretKey};
+        use crate::ed25519::{PublicKey, SecretKey};
         let secret = {
-            let mut seed = SecretKey::new_zeroed();
             let s = yasna::parse_der(&reader.next().read_bytes()?, |reader| reader.read_bytes())?;
-            clone(&s, &mut seed.key);
-            seed
+            SecretKey::from_bytes(&s)?
         };
         let _public = {
             let public = reader
                 .next()
                 .read_tagged(yasna::Tag::context(1), |reader| reader.read_bitvec())?
                 .to_bytes();
-            let mut p = PublicKey::new_zeroed();
-            clone(&public, &mut p.key);
-            p
+            PublicKey::from_bytes(&public)?
         };
         Ok(key::KeyPair::Ed25519(secret))
     } else {
@@ -254,8 +250,7 @@ fn read_key_v0(reader: &mut BERReaderSeq) -> Result<key::KeyPair, Error> {
 
 #[test]
 fn test_read_write_pkcs8() {
-    let (public, secret) = key::ed25519::keypair();
-    assert_eq!(&public.key, &secret.key[32..]);
+    let secret = crate::ed25519::keypair();
     let key = key::KeyPair::Ed25519(secret);
     let password = b"blabla";
     let ciphertext = encode_pkcs8_encrypted(password, 100, &key).unwrap();
@@ -309,13 +304,6 @@ pub fn encode_pkcs8(key: &key::KeyPair) -> Vec<u8> {
             key::KeyPair::Ec { .. } => unimplemented!(),
         })
     })
-}
-
-fn clone(src: &[u8], dest: &mut [u8]) {
-    let i = src.iter().take_while(|b| **b == 0).count();
-    let src = &src[i..];
-    let l = dest.len();
-    (&mut dest[l - src.len()..]).clone_from_slice(src)
 }
 
 fn asn1_write_pbes2(writer: yasna::DERWriter, rounds: u64, salt: &[u8], iv: &[u8]) {

@@ -238,18 +238,14 @@ impl<S: AsyncRead + AsyncWrite + Send + Unpin + 'static, A: Agent + Send + 'stat
         let t = r.read_string()?;
         let (blob, key) = match t {
             b"ssh-ed25519" => {
-                let public_ = r.read_string()?;
+                let public = r.read_string()?;
                 let pos1 = r.position;
                 let concat = r.read_string()?;
                 let _comment = r.read_string()?;
-                if &concat[32..64] != public_ {
+                if &concat[32..64] != public {
                     return Ok(false);
                 }
-                use key::ed25519::*;
-                let mut public = PublicKey::new_zeroed();
-                let mut secret = SecretKey::new_zeroed();
-                public.key.clone_from_slice(&public_[..32]);
-                secret.key.clone_from_slice(&concat[..]);
+                let secret = crate::ed25519::SecretKey::from_bytes(concat)?;
                 writebuf.push(msg::SUCCESS);
                 (self.buf[pos0..pos1].to_vec(), key::KeyPair::Ed25519(secret))
             }
