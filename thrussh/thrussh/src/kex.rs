@@ -15,11 +15,11 @@
 use crate::session::Exchange;
 use crate::{cipher, cipher::integrity};
 use cryptovec::CryptoVec;
-use openssl;
-use openssl::hash::{DigestBytes, MessageDigest};
 use std::cell::RefCell;
 use thrussh_keys::encoding::Encoding;
-use thrussh_keys::key::{KeyPair, PublicKey};
+use thrussh_keys::key::{KeyPair, PublicKey, SignatureHash};
+
+pub type DigestBytes = Vec<u8>;
 
 #[derive(Debug)]
 pub enum Algorithms {
@@ -88,7 +88,7 @@ thread_local! {
 pub struct Output {
     pub shared_secret: CryptoVec,
     pub exchange_hash: DigestBytes,
-    pub digest: MessageDigest,
+    pub digest: SignatureHash,
 }
 
 impl Output {
@@ -134,15 +134,15 @@ impl Output {
 }
 
 pub mod ecdh {
+    use super::DigestBytes;
     use crate::key::PubKey;
     use crate::session::Exchange;
     use crate::{key, msg};
     use cryptovec::CryptoVec;
-    use openssl::hash::{hash, DigestBytes, MessageDigest};
     use openssl::rand::rand_bytes;
     use sodium::scalarmult::*;
     use thrussh_keys::encoding::{Encoding, Reader};
-    use thrussh_keys::key::{KeyPair, PublicKey};
+    use thrussh_keys::key::{KeyPair, PublicKey, SignatureHash};
 
     // We used to support curve "NIST P-256" here, but the security of
     // that curve is controversial, see
@@ -151,16 +151,15 @@ pub mod ecdh {
     pub struct Algorithm {
         local_pubkey: Option<GroupElement>,
         local_secret: Option<Scalar>,
-        digest: MessageDigest,
+        digest: SignatureHash,
     }
 
     impl std::fmt::Debug for Algorithm {
         fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
             write!(
                 f,
-                "ecdh::Algorithm {{ local_pubkey: {:?}, local_secret: [hidden], digest: {} }}",
-                self.local_pubkey,
-                self.digest.type_().short_name().unwrap_or("err"),
+                "ecdh::Algorithm {{ local_pubkey: {:?}, local_secret: [hidden], digest: {:?} }}",
+                self.local_pubkey, self.digest,
             )
         }
     }
@@ -170,7 +169,7 @@ pub mod ecdh {
             Ok(Algorithm {
                 local_pubkey: None,
                 local_secret: None,
-                digest: MessageDigest::sha256(),
+                digest: SignatureHash::SHA2_256,
             })
         }
 
@@ -292,34 +291,34 @@ pub mod ecdh {
                 buffer.extend_ssh_string(&client_pubkey.0);
                 buffer.extend_ssh_string(&server_pubkey.0);
                 buffer.extend_ssh_mpint(&shared_secret.0);
-                Ok(hash(self.digest.clone(), &buffer)?)
+                Ok(self.digest.hash(&buffer))
             })
         }
     }
 }
 
 pub mod dh {
+    use super::DigestBytes;
     use crate::key::PubKey;
     use crate::session::Exchange;
     use crate::{key, msg};
     use cryptovec::CryptoVec;
     use openssl::bn::{BigNum, BigNumContext};
-    use openssl::hash::{hash, DigestBytes, MessageDigest};
     use thrussh_keys::encoding::{Encoding, Reader};
-    use thrussh_keys::key::KeyPair;
+    use thrussh_keys::key::{KeyPair, SignatureHash};
 
     pub struct Algorithm {
         p: BigNum,
         g: BigNum,
-        digest: MessageDigest,
+        digest: SignatureHash,
     }
 
     impl std::fmt::Debug for Algorithm {
         fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
             write!(
                 f,
-                "dh::Algorithm {{ p: [omitted], g: [omitted], digest: {} }}",
-                self.digest.type_().short_name().unwrap_or("err"),
+                "dh::Algorithm {{ p: [omitted], g: [omitted], digest: {:?} }}",
+                self.digest,
             )
         }
     }
@@ -329,7 +328,7 @@ pub mod dh {
             Ok(Algorithm {
                 p: BigNum::get_rfc3526_prime_2048()?,
                 g: BigNum::from_u32(2)?,
-                digest: MessageDigest::sha1(),
+                digest: SignatureHash::SHA1,
             })
         }
 
@@ -337,7 +336,7 @@ pub mod dh {
             Ok(Algorithm {
                 p: BigNum::get_rfc3526_prime_2048()?,
                 g: BigNum::from_u32(2)?,
-                digest: MessageDigest::sha256(),
+                digest: SignatureHash::SHA2_256,
             })
         }
 
@@ -383,7 +382,7 @@ pub mod dh {
             reply.push(msg::KEXDH_REPLY);
             key.push_to(reply);
             reply.extend_ssh_mpint(&server_pubkey.to_vec());
-            key.add_signature(reply, exchange_hash)?;
+            key.add_signature(reply, &exchange_hash)?;
 
             Ok(super::Output {
                 exchange_hash,
@@ -412,14 +411,14 @@ pub mod dh {
                 buffer.extend_ssh_mpint(&client_pubkey.to_vec());
                 buffer.extend_ssh_mpint(&server_pubkey.to_vec());
                 buffer.extend_ssh_mpint(&shared_secret.to_vec());
-                Ok(hash(self.digest.clone(), &buffer)?)
+                Ok(self.digest.hash(&buffer))
             })
         }
     }
 }
 
 pub struct ComputeKeys<'a> {
-    digest: MessageDigest,
+    digest: SignatureHash,
     shared_secret: &'a [u8],
     session_id: &'a DigestBytes,
     exchange_hash: &'a DigestBytes,
@@ -449,8 +448,7 @@ impl ComputeKeys<'_> {
             buffer.extend(self.exchange_hash);
             buffer.push(c);
             buffer.extend(self.session_id);
-            use openssl::hash::*;
-            n += Self::truncated_copy(&mut out, &hash(self.digest.clone(), &buffer)?);
+            n += Self::truncated_copy(&mut out, &self.digest.hash(&buffer));
 
             while n < out.len() {
                 // extend.
@@ -458,7 +456,7 @@ impl ComputeKeys<'_> {
                 buffer.extend_ssh_mpint(&self.shared_secret);
                 buffer.extend(self.exchange_hash);
                 buffer.extend(&out[..n]);
-                n += Self::truncated_copy(&mut out[n..], &hash(self.digest.clone(), &buffer)?);
+                n += Self::truncated_copy(&mut out[n..], &self.digest.hash(&buffer));
             }
             Ok(out)
         })

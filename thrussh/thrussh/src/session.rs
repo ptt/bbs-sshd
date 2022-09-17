@@ -18,7 +18,6 @@ use crate::{auth, cipher, cipher::integrity, kex, msg, negotiation};
 use crate::{Channel, ChannelId, Disconnect, Limits};
 use byteorder::{BigEndian, ByteOrder};
 use cryptovec::CryptoVec;
-use openssl::hash;
 use std::collections::HashMap;
 use std::num::Wrapping;
 use std::sync::Arc;
@@ -32,7 +31,7 @@ pub(crate) struct Encrypted {
     pub exchange: Option<Exchange>,
     pub key: usize,
     pub mac: Option<integrity::Name>,
-    pub session_id: hash::DigestBytes,
+    pub session_id: kex::DigestBytes,
     pub rekey: Option<Kex>,
     pub channels: HashMap<ChannelId, Channel>,
     pub last_channel_id: Wrapping<u32>,
@@ -402,7 +401,7 @@ pub enum Kex {
 pub struct KexInit {
     pub algo: Option<negotiation::Names>,
     pub exchange: Exchange,
-    pub session_id: Option<hash::DigestBytes>,
+    pub session_id: Option<kex::DigestBytes>,
     pub sent: bool,
 }
 
@@ -410,7 +409,7 @@ impl KexInit {
     pub fn received_rekey(
         ex: Exchange,
         algo: negotiation::Names,
-        session_id: &hash::DigestBytes,
+        session_id: &kex::DigestBytes,
     ) -> Self {
         let mut kexinit = KexInit {
             exchange: ex,
@@ -425,7 +424,7 @@ impl KexInit {
         kexinit
     }
 
-    pub fn initiate_rekey(ex: Exchange, session_id: &hash::DigestBytes) -> Self {
+    pub fn initiate_rekey(ex: Exchange, session_id: &kex::DigestBytes) -> Self {
         let mut kexinit = KexInit {
             exchange: ex,
             algo: None,
@@ -445,7 +444,7 @@ pub struct KexDh {
     pub exchange: Exchange,
     pub names: negotiation::Names,
     pub key: usize,
-    pub session_id: Option<hash::DigestBytes>,
+    pub session_id: Option<kex::DigestBytes>,
 }
 
 #[derive(Debug)]
@@ -453,7 +452,7 @@ pub struct KexDhDone {
     pub exchange: Exchange,
     pub kex: kex::Algorithms,
     pub key: usize,
-    pub session_id: Option<hash::DigestBytes>,
+    pub session_id: Option<kex::DigestBytes>,
     pub names: negotiation::Names,
 }
 
@@ -463,7 +462,7 @@ pub struct NewKeys {
     pub names: negotiation::Names,
     pub key: usize,
     pub cipher: cipher::CipherPair,
-    pub session_id: hash::DigestBytes,
+    pub session_id: kex::DigestBytes,
     pub received: bool,
     pub sent: bool,
 }

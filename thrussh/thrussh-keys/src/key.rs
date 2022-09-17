@@ -84,16 +84,6 @@ impl SignatureHash {
         }
     }
 
-    fn to_message_digest(&self) -> openssl::hash::MessageDigest {
-        use openssl::hash::MessageDigest;
-        match *self {
-            SignatureHash::SHA2_256 => MessageDigest::sha256(),
-            SignatureHash::SHA2_384 => MessageDigest::sha384(),
-            SignatureHash::SHA2_512 => MessageDigest::sha512(),
-            SignatureHash::SHA1 => MessageDigest::sha1(),
-        }
-    }
-
     fn to_rsa_hash(&self) -> rsa::hash::Hash {
         use rsa::hash::Hash;
         match *self {
@@ -104,7 +94,7 @@ impl SignatureHash {
         }
     }
 
-    fn hash(&self, data: &[u8]) -> Vec<u8> {
+    pub fn hash(&self, data: &[u8]) -> Vec<u8> {
         use digest::Digest;
         match *self {
             SignatureHash::SHA2_256 => sha2::Sha256::new_with_prefix(data).finalize().to_vec(),
@@ -494,7 +484,7 @@ fn ec_signature(
     key: &openssl::ec::EcKey<Private>,
     b: &[u8],
 ) -> Result<Vec<u8>, Error> {
-    let data = openssl::hash::hash(hash.to_message_digest(), b)?;
+    let data = hash.hash(b);
     let sig = openssl::ecdsa::EcdsaSig::sign(&data, key)?;
     let mut buf = Vec::new();
     buf.extend_ssh_mpint(&sig.r().to_vec());
@@ -508,7 +498,7 @@ fn ec_verify(
     b: &[u8],
     sig: &[u8],
 ) -> Result<bool, Error> {
-    let data = openssl::hash::hash(hash.to_message_digest(), b)?;
+    let data = hash.hash(b);
     let mut reader = sig.reader(0);
     let sig = openssl::ecdsa::EcdsaSig::from_private_components(
         openssl::bn::BigNum::from_slice(reader.read_mpint()?)?,
