@@ -1,11 +1,11 @@
-use super::{pkcs_unpad, Encryption};
+use super::Encryption;
 use crate::key;
 use crate::key::SignatureHash;
 use crate::Error;
 use bit_vec::BitVec;
+use cipher::{BlockDecryptMut, BlockEncryptMut, KeyIvInit};
 use openssl::hash::MessageDigest;
 use openssl::rand::rand_bytes;
-use openssl::symm::{decrypt, encrypt, Cipher};
 use std;
 use std::borrow::Cow;
 use yasna;
@@ -289,12 +289,9 @@ pub fn encode_pkcs8_encrypted(
         &mut dkey,
     )?;
 
-    let mut plaintext = encode_pkcs8(key);
-
-    let padding_len = 32 - (plaintext.len() % 32);
-    plaintext.extend(std::iter::repeat(padding_len as u8).take(padding_len));
-
-    let ciphertext = encrypt(Cipher::aes_256_cbc(), &dkey, Some(&iv), &plaintext)?;
+    let plaintext = encode_pkcs8(key);
+    let ciphertext = cbc::Encryptor::<aes::Aes256>::new(&dkey.into(), &iv.into())
+        .encrypt_padded_vec_mut::<block_padding::Pkcs7>(&plaintext);
 
     Ok(yasna::construct_der(|writer| {
         writer.write_sequence(|writer| {
@@ -424,13 +421,25 @@ impl Encryption {
     }
 
     fn decrypt(&self, key: &[u8], ciphertext: &[u8]) -> Result<Vec<u8>, Error> {
-        let (cipher, iv) = match *self {
-            Encryption::Aes128Cbc(ref iv) => (Cipher::aes_128_cbc(), iv),
-            Encryption::Aes256Cbc(ref iv) => (Cipher::aes_256_cbc(), iv),
-        };
-        let mut dec = decrypt(cipher, &key, Some(&iv[..]), ciphertext)?;
-        pkcs_unpad(&mut dec);
-        Ok(dec)
+        self.decrypt_impl(key, ciphertext)
+            .ok_or(Error::CouldNotReadKey)
+    }
+
+    fn decrypt_impl(&self, key: &[u8], ciphertext: &[u8]) -> Option<Vec<u8>> {
+        match *self {
+            Encryption::Aes128Cbc(ref iv) => {
+                cbc::Decryptor::<aes::Aes128>::new_from_slices(key, iv)
+                    .ok()?
+                    .decrypt_padded_vec_mut::<block_padding::Pkcs7>(ciphertext)
+                    .ok()
+            }
+            Encryption::Aes256Cbc(ref iv) => {
+                cbc::Decryptor::<aes::Aes256>::new_from_slices(key, iv)
+                    .ok()?
+                    .decrypt_padded_vec_mut::<block_padding::Pkcs7>(ciphertext)
+                    .ok()
+            }
+        }
     }
 }
 

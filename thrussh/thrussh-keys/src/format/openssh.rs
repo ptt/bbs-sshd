@@ -4,7 +4,6 @@ use crate::encoding::Reader;
 use crate::key;
 use crate::Error;
 use cryptovec::CryptoVec;
-use openssl::symm::{Cipher, Crypter, Mode};
 use rsa::{BigUint, RsaPrivateKey};
 
 /// Decode a secret key given in the OpenSSH format, deciphering it if
@@ -106,48 +105,69 @@ fn decrypt_secret_key(
             Err(Error::CouldNotReadKey.into())
         }
     } else if let Some(password) = password {
-        let mut key = CryptoVec::new();
-        let cipher = match ciphername {
-            b"aes128-cbc" => {
-                key.resize(16 + 16);
-                Cipher::aes_128_cbc()
-            }
-            b"aes128-ctr" => {
-                key.resize(16 + 16);
-                Cipher::aes_128_ctr()
-            }
-            b"aes256-cbc" => {
-                key.resize(16 + 32);
-                Cipher::aes_256_cbc()
-            }
-            b"aes256-ctr" => {
-                key.resize(16 + 32);
-                Cipher::aes_256_ctr()
-            }
+        match ciphername {
+            b"aes128-cbc" => cbc_decrypt(
+                kdf_init::<cbc::Decryptor<aes::Aes128>>(kdfname, kdfoptions, password)?,
+                secret_key,
+            ),
+            b"aes128-ctr" => ctr_decrypt(
+                kdf_init::<ctr::Ctr128BE<aes::Aes128>>(kdfname, kdfoptions, password)?,
+                secret_key,
+            ),
+            b"aes256-cbc" => cbc_decrypt(
+                kdf_init::<cbc::Decryptor<aes::Aes256>>(kdfname, kdfoptions, password)?,
+                secret_key,
+            ),
+            b"aes256-ctr" => ctr_decrypt(
+                kdf_init::<ctr::Ctr128BE<aes::Aes256>>(kdfname, kdfoptions, password)?,
+                secret_key,
+            ),
             _ => return Err(Error::CouldNotReadKey.into()),
-        };
-
-        match kdfname {
-            b"bcrypt" => {
-                let mut kdfopts = kdfoptions.reader(0);
-                let salt = kdfopts.read_string()?;
-                let rounds = kdfopts.read_u32()?;
-                bcrypt_pbkdf::bcrypt_pbkdf(password, salt, rounds, &mut key);
-            }
-            _kdfname => {
-                return Err(Error::CouldNotReadKey.into());
-            }
-        };
-        let iv = &key[32..];
-        let key = &key[..32];
-        let mut c = Crypter::new(cipher, Mode::Decrypt, &key, Some(&iv))?;
-        c.pad(false);
-        let mut dec = vec![0; secret_key.len() + 32];
-        let n = c.update(&secret_key, &mut dec)?;
-        let n = n + c.finalize(&mut dec[n..])?;
-        dec.truncate(n);
-        Ok(dec)
+        }
     } else {
         Err(Error::KeyIsEncrypted.into())
     }
+}
+
+fn kdf_init<C>(kdfname: &[u8], kdfoptions: &[u8], password: &[u8]) -> Result<C, Error>
+where
+    C: cipher::KeyIvInit,
+{
+    let key_len = C::key_size();
+    let iv_len = C::iv_size();
+
+    let mut key = CryptoVec::new();
+    key.resize(key_len + iv_len);
+    match kdfname {
+        b"bcrypt" => {
+            let mut kdfopts = kdfoptions.reader(0);
+            let salt = kdfopts.read_string()?;
+            let rounds = kdfopts.read_u32()?;
+            bcrypt_pbkdf::bcrypt_pbkdf(password, salt, rounds, &mut key);
+        }
+        _kdfname => {
+            return Err(Error::CouldNotReadKey.into());
+        }
+    };
+
+    let (key, iv) = key.split_at(key_len);
+    Ok(C::new(key.into(), iv.into()))
+}
+
+fn cbc_decrypt<C>(decryptor: C, secret_key: &[u8]) -> Result<Vec<u8>, Error>
+where
+    C: cipher::BlockDecryptMut,
+{
+    decryptor
+        .decrypt_padded_vec_mut::<block_padding::NoPadding>(secret_key)
+        .map_err(|_| Error::CouldNotReadKey)
+}
+
+fn ctr_decrypt<C>(mut stream_cipher: C, secret_key: &[u8]) -> Result<Vec<u8>, Error>
+where
+    C: cipher::StreamCipher,
+{
+    let mut buf = secret_key.to_vec();
+    stream_cipher.apply_keystream(&mut buf);
+    Ok(buf)
 }

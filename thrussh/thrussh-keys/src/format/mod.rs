@@ -114,16 +114,3 @@ fn decode_rsa(secret: &[u8]) -> Result<key::KeyPair, Error> {
         hash: key::SignatureHash::SHA2_256,
     })
 }
-
-fn pkcs_unpad(dec: &mut Vec<u8>) {
-    let len = dec.len();
-    if len > 0 {
-        let padding_len = dec[len - 1];
-        if dec[(len - padding_len as usize)..]
-            .iter()
-            .all(|&x| x == padding_len)
-        {
-            dec.truncate(len - padding_len as usize)
-        }
-    }
-}
