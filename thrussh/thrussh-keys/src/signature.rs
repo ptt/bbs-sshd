@@ -18,8 +18,8 @@ pub enum Signature {
     RSA { hash: SignatureHash, bytes: Vec<u8> },
     /// An ECDSA signature
     Ecdsa {
-        typ: crate::key::EcKeyType,
         bytes: Vec<u8>,
+        algorithm_name: &'static str,
     },
 }
 
@@ -52,8 +52,11 @@ impl Signature {
                 bytes_.extend_ssh_string(t);
                 bytes_.extend_ssh_string(&bytes[..]);
             }
-            Signature::Ecdsa { bytes, typ } => {
-                let name = typ.name().as_bytes();
+            Signature::Ecdsa {
+                bytes,
+                algorithm_name,
+            } => {
+                let name = algorithm_name.as_bytes();
                 bytes_
                     .write_u32::<BigEndian>((name.len() + bytes.len() + 8) as u32)
                     .unwrap();

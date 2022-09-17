@@ -23,7 +23,6 @@ use std::num::Wrapping;
 use std::sync::Arc;
 use thrussh_keys::encoding::Encoding;
 
-#[derive(Debug)]
 pub(crate) struct Encrypted {
     pub state: EncryptedState,
 

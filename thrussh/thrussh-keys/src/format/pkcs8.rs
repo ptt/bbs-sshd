@@ -264,7 +264,7 @@ fn test_read_write_pkcs8() {
     match key {
         key::KeyPair::Ed25519 { .. } => println!("Ed25519"),
         key::KeyPair::RSA { .. } => println!("RSA"),
-        key::KeyPair::Ec { ref typ, .. } => println!("EC {{ {} }}", typ.name()),
+        key::KeyPair::Ec { ref key } => println!("EC {{ {} }}", key.algorithm_name()),
     }
 }
 

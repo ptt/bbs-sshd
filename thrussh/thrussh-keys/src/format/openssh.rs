@@ -1,9 +1,9 @@
 use crate::bcrypt_pbkdf;
+use crate::ec;
 use crate::encoding::Reader;
 use crate::key;
 use crate::Error;
 use cryptovec::CryptoVec;
-use openssl::bn::BigNum;
 use openssl::symm::{Cipher, Crypter, Mode};
 use rsa::{BigUint, RsaPrivateKey};
 
@@ -64,28 +64,24 @@ pub fn decode_openssh(secret: &[u8], password: Option<&[u8]>) -> Result<key::Key
                 });
             } else if key_type == crate::KEYTYPE_ECDSA_SHA2_NISTP256
                 || key_type == crate::KEYTYPE_ECDSA_SHA2_NISTP384
-                || key_type == crate::KEYTYPE_ECDSA_SHA2_NISTP521
             {
                 let ident = position.read_string()?;
                 let pubkey = position.read_string()?;
                 let seckey = position.read_string()?;
                 let _comment = position.read_string()?;
 
-                let typ = crate::key::EcKeyType::new_from_name(key_type).unwrap();
-                if typ.ident().as_bytes() != ident {
-                    return Err(Error::CouldNotReadKey.into());
+                let key = ec::EcPrivateKey::new_from_secret_scalar(key_type, seckey)?;
+
+                if ident != key.ident().as_bytes() {
+                    return Err(Error::CouldNotReadKey);
                 }
 
-                use openssl::ec::*;
-                use openssl::pkey::Private;
-                let group = EcGroup::from_curve_name(typ.curve_nid())?;
-                let mut cx = openssl::bn::BigNumContext::new()?;
-                let point = EcPoint::from_bytes(&group, pubkey, &mut cx)?;
-                let private = BigNum::from_slice(seckey)?;
-                let key = openssl::ec::EcKey::<Private>::from_private_components(
-                    &group, &private, &point,
-                )?;
-                return Ok(key::KeyPair::Ec { key, typ });
+                let pubkey = ec::EcPublicKey::from_sec1_bytes(key_type, pubkey)?;
+                if pubkey.to_sec1_bytes() != key.to_public_key().to_sec1_bytes() {
+                    return Err(Error::CouldNotReadKey);
+                }
+
+                return Ok(key::KeyPair::Ec { key });
             } else {
                 return Err(Error::UnsupportedKeyType(key_type.to_vec()).into());
             }

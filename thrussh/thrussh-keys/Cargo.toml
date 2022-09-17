@@ -19,6 +19,7 @@ include = [
 "src/agent/client.rs",
 "src/bcrypt_pbkdf.rs",
 "src/blowfish.rs",
+"src/ec.rs",
 "src/encoding.rs",
 "src/format/mod.rs",
 "src/format/openssh.rs",
@@ -51,6 +52,12 @@ rsa = "0.6.1"
 sha1 = "0.10.4"
 sha2 = "0.10.5"
 digest = "0.10.3"
+p256 = "0.11.1"
+p384 = "0.11.2"
+elliptic-curve = "0.12.1"
+crypto-bigint = "0.4.4"
+typenum = "1.15.0"
+ecdsa = "0.14.6"
 
 [dev-dependencies]
 env_logger = "0.9.0"

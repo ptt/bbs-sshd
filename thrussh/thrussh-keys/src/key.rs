@@ -12,11 +12,11 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 //
+use crate::ec;
 use crate::encoding::{Encoding, Reader};
 pub use crate::signature::*;
 use crate::Error;
 use cryptovec::CryptoVec;
-use openssl::pkey::{Private, Public};
 
 /// Keys for elliptic curve Ed25519 cryptography.
 pub mod ed25519 {
@@ -105,56 +105,6 @@ impl SignatureHash {
     }
 }
 
-/// Key type of an EC key
-#[derive(Eq, PartialEq, Clone, Debug)]
-pub struct EcKeyType {
-    pub hash: SignatureHash,
-    pub ident: &'static str,
-}
-
-impl EcKeyType {
-    pub fn new_from_name(name: &[u8]) -> Option<EcKeyType> {
-        Some(match name {
-            crate::KEYTYPE_ECDSA_SHA2_NISTP256 => EcKeyType {
-                hash: SignatureHash::SHA2_256,
-                ident: &"nistp256",
-            },
-            crate::KEYTYPE_ECDSA_SHA2_NISTP384 => EcKeyType {
-                hash: SignatureHash::SHA2_384,
-                ident: &"nistp384",
-            },
-            crate::KEYTYPE_ECDSA_SHA2_NISTP521 => EcKeyType {
-                hash: SignatureHash::SHA2_512,
-                ident: &"nistp521",
-            },
-            _ => return None,
-        })
-    }
-
-    pub fn name(&self) -> &'static str {
-        match (self.hash, self.ident) {
-            (SignatureHash::SHA2_256, "nistp256") => "ecdsa-sha2-nistp256",
-            (SignatureHash::SHA2_384, "nistp384") => "ecdsa-sha2-nistp384",
-            (SignatureHash::SHA2_512, "nistp521") => "ecdsa-sha2-nistp521",
-            _ => unreachable!(),
-        }
-    }
-
-    pub fn ident(&self) -> &'static str {
-        self.ident
-    }
-
-    pub fn curve_nid(&self) -> openssl::nid::Nid {
-        use openssl::nid::Nid;
-        match self.ident {
-            "nistp256" => Nid::X9_62_PRIME256V1,
-            "nistp384" => Nid::SECP384R1,
-            "nistp521" => Nid::SECP521R1,
-            _ => unreachable!(),
-        }
-    }
-}
-
 /// Public key
 #[derive(Eq, PartialEq, Debug)]
 pub enum PublicKey {
@@ -166,23 +116,7 @@ pub enum PublicKey {
         hash: SignatureHash,
     },
     #[doc(hidden)]
-    Ec { key: OpenSSLPKey, typ: EcKeyType },
-}
-
-/// A public key from OpenSSL.
-pub struct OpenSSLPKey(pub openssl::pkey::PKey<Public>);
-
-use std::cmp::{Eq, PartialEq};
-impl PartialEq for OpenSSLPKey {
-    fn eq(&self, b: &OpenSSLPKey) -> bool {
-        self.0.public_eq(&b.0)
-    }
-}
-impl Eq for OpenSSLPKey {}
-impl std::fmt::Debug for OpenSSLPKey {
-    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
-        write!(f, "OpenSSLPKey {{ (hidden) }}")
-    }
+    Ec { key: ec::EcPublicKey },
 }
 
 impl PublicKey {
@@ -237,7 +171,7 @@ impl PublicKey {
         match *self {
             PublicKey::Ed25519(_) => ED25519.0,
             PublicKey::RSA { ref hash, .. } => hash.name().0,
-            PublicKey::Ec { ref typ, .. } => typ.name(),
+            PublicKey::Ec { ref key } => key.algorithm_name(),
         }
     }
 
@@ -258,13 +192,7 @@ impl PublicKey {
                 )
                 .is_ok()
             }
-            &PublicKey::Ec { ref key, ref typ } => {
-                if let Ok(key) = key.0.ec_key() {
-                    ec_verify(&typ.hash, &key, buffer, sig).unwrap_or(false)
-                } else {
-                    false
-                }
-            }
+            &PublicKey::Ec { ref key, .. } => ec_verify(key, buffer, sig).is_ok(),
         }
     }
 
@@ -305,8 +233,7 @@ pub enum KeyPair {
         hash: SignatureHash,
     },
     Ec {
-        key: openssl::ec::EcKey<Private>,
-        typ: EcKeyType,
+        key: ec::EcPrivateKey,
     },
 }
 
@@ -319,7 +246,7 @@ impl std::fmt::Debug for KeyPair {
                 &key.key[32..]
             ),
             KeyPair::RSA { .. } => write!(f, "RSA {{ (hidden) }}"),
-            KeyPair::Ec { ref typ, .. } => write!(f, "Ec {{ {} }}", typ.name()),
+            KeyPair::Ec { ref key } => write!(f, "Ec {{ key: {:?} }}", key),
         }
     }
 }
@@ -343,19 +270,9 @@ impl KeyPair {
                 key: key.to_public_key(),
                 hash: hash.clone(),
             },
-            &KeyPair::Ec { ref key, ref typ } => {
-                use openssl::ec::EcKey;
-                use openssl::pkey::PKey;
-                PublicKey::Ec {
-                    key: OpenSSLPKey(
-                        PKey::from_ec_key(
-                            EcKey::from_public_key(key.group(), key.public_key()).unwrap(),
-                        )
-                        .unwrap(),
-                    ),
-                    typ: typ.clone(),
-                }
-            }
+            &KeyPair::Ec { ref key } => PublicKey::Ec {
+                key: key.to_public_key(),
+            },
         }
     }
 
@@ -364,7 +281,7 @@ impl KeyPair {
         match *self {
             KeyPair::Ed25519(_) => ED25519.0,
             KeyPair::RSA { ref hash, .. } => hash.name().0,
-            KeyPair::Ec { ref typ, .. } => typ.name(),
+            KeyPair::Ec { ref key } => key.algorithm_name(),
         }
     }
 
@@ -390,9 +307,9 @@ impl KeyPair {
                 bytes: rsa_signature(hash, key, to_sign.as_ref())?,
                 hash: *hash,
             }),
-            &KeyPair::Ec { ref key, ref typ } => Ok(Signature::Ecdsa {
-                bytes: ec_signature(&typ.hash, key, to_sign.as_ref())?,
-                typ: typ.clone(),
+            &KeyPair::Ec { ref key } => Ok(Signature::Ecdsa {
+                bytes: ec_signature(key, to_sign.as_ref())?,
+                algorithm_name: key.algorithm_name(),
             }),
         }
     }
@@ -422,9 +339,9 @@ impl KeyPair {
                 buffer.extend_ssh_string(name.0.as_bytes());
                 buffer.extend_ssh_string(&signature);
             }
-            &KeyPair::Ec { ref key, ref typ } => {
-                let signature = ec_signature(&typ.hash, key, to_sign.as_ref())?;
-                let name = typ.name().as_bytes();
+            &KeyPair::Ec { ref key } => {
+                let signature = ec_signature(key, to_sign.as_ref())?;
+                let name = key.algorithm_name().as_bytes();
                 buffer.push_u32_be((name.len() + signature.len() + 8) as u32);
                 buffer.extend_ssh_string(name);
                 buffer.extend_ssh_string(&signature);
@@ -453,9 +370,9 @@ impl KeyPair {
                 buffer.extend_ssh_string(name.0.as_bytes());
                 buffer.extend_ssh_string(&signature);
             }
-            &KeyPair::Ec { ref key, ref typ } => {
-                let signature = ec_signature(&typ.hash, key, buffer)?;
-                let name = typ.name().as_bytes();
+            &KeyPair::Ec { ref key } => {
+                let signature = ec_signature(key, buffer)?;
+                let name = key.algorithm_name().as_bytes();
                 buffer.push_u32_be((name.len() + signature.len() + 8) as u32);
                 buffer.extend_ssh_string(name);
                 buffer.extend_ssh_string(&signature);
@@ -479,32 +396,17 @@ fn rsa_signature(
     .map_err(Error::from)
 }
 
-fn ec_signature(
-    hash: &SignatureHash,
-    key: &openssl::ec::EcKey<Private>,
-    b: &[u8],
-) -> Result<Vec<u8>, Error> {
-    let data = hash.hash(b);
-    let sig = openssl::ecdsa::EcdsaSig::sign(&data, key)?;
+fn ec_signature(key: &ec::EcPrivateKey, b: &[u8]) -> Result<Vec<u8>, Error> {
+    let (r, s) = key.try_sign(b)?;
     let mut buf = Vec::new();
-    buf.extend_ssh_mpint(&sig.r().to_vec());
-    buf.extend_ssh_mpint(&sig.s().to_vec());
+    buf.extend_ssh_mpint(&r);
+    buf.extend_ssh_mpint(&s);
     Ok(buf)
 }
 
-fn ec_verify(
-    hash: &SignatureHash,
-    key: &openssl::ec::EcKey<Public>,
-    b: &[u8],
-    sig: &[u8],
-) -> Result<bool, Error> {
-    let data = hash.hash(b);
+fn ec_verify(key: &ec::EcPublicKey, b: &[u8], sig: &[u8]) -> Result<(), Error> {
     let mut reader = sig.reader(0);
-    let sig = openssl::ecdsa::EcdsaSig::from_private_components(
-        openssl::bn::BigNum::from_slice(reader.read_mpint()?)?,
-        openssl::bn::BigNum::from_slice(reader.read_mpint()?)?,
-    )?;
-    Ok(sig.verify(&data, key)?)
+    key.verify(b, reader.read_mpint()?, reader.read_mpint()?)
 }
 
 /// Parse a public key from a byte slice.
@@ -529,27 +431,17 @@ pub fn parse_public_key(p: &[u8]) -> Result<PublicKey, Error> {
             hash: SignatureHash::SHA2_256,
         });
     }
-    if t == crate::KEYTYPE_ECDSA_SHA2_NISTP256
-        || t == crate::KEYTYPE_ECDSA_SHA2_NISTP384
-        || t == crate::KEYTYPE_ECDSA_SHA2_NISTP521
-    {
-        use openssl::bn::*;
-        use openssl::ec::*;
-        use openssl::pkey::*;
+    if t == crate::KEYTYPE_ECDSA_SHA2_NISTP256 || t == crate::KEYTYPE_ECDSA_SHA2_NISTP384 {
+        let ident = pos.read_string()?;
+        let q = pos.read_string()?;
 
-        let typ = EcKeyType::new_from_name(t).unwrap();
-        if pos.read_string()? != typ.ident().as_bytes() {
-            return Err(Error::CouldNotReadKey.into());
+        let key = ec::EcPublicKey::from_sec1_bytes(t, q)?;
+
+        if key.ident().as_bytes() != ident {
+            return Err(Error::CouldNotReadKey);
         }
 
-        let q = pos.read_string()?;
-        let group = EcGroup::from_curve_name(typ.curve_nid())?;
-        let mut cx = BigNumContext::new()?;
-        let key = OpenSSLPKey(PKey::from_ec_key(EcKey::from_public_key(
-            &group,
-            EcPoint::from_bytes(&group, q, &mut cx)?.as_ref(),
-        )?)?);
-        return Ok(PublicKey::Ec { key, typ });
+        return Ok(PublicKey::Ec { key });
     }
     Err(Error::CouldNotReadKey.into())
 }

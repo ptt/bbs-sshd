@@ -13,6 +13,7 @@
 // limitations under the License.
 //
 use cryptovec::CryptoVec;
+use thrussh_keys::ec;
 use thrussh_keys::encoding::*;
 use thrussh_keys::key::*;
 
@@ -38,8 +39,8 @@ impl PubKey for PublicKey {
                 buffer.extend_ssh_mpint(&e);
                 buffer.extend_ssh_mpint(&n);
             }
-            &PublicKey::Ec { ref key, ref typ } => {
-                write_ec_public_key(buffer, key.0.ec_key().unwrap().as_ref(), typ);
+            &PublicKey::Ec { ref key } => {
+                write_ec_public_key(buffer, key);
             }
         }
     }
@@ -63,29 +64,17 @@ impl PubKey for KeyPair {
                 buffer.extend_ssh_mpint(&e);
                 buffer.extend_ssh_mpint(&n);
             }
-            &KeyPair::Ec { ref key, ref typ } => {
-                write_ec_public_key(buffer, key, typ);
+            &KeyPair::Ec { ref key } => {
+                write_ec_public_key(buffer, &key.to_public_key());
             }
         }
     }
 }
 
-pub fn write_ec_public_key<T: openssl::pkey::HasPublic>(
-    buf: &mut CryptoVec,
-    key: &openssl::ec::EcKeyRef<T>,
-    typ: &thrussh_keys::key::EcKeyType,
-) {
-    let name = typ.name().as_bytes();
-    let ident = typ.ident().as_bytes();
-    let mut cx = openssl::bn::BigNumContext::new().unwrap();
-    let q = key
-        .public_key()
-        .to_bytes(
-            key.group(),
-            openssl::ec::PointConversionForm::UNCOMPRESSED,
-            &mut cx,
-        )
-        .unwrap();
+pub fn write_ec_public_key(buf: &mut CryptoVec, key: &ec::EcPublicKey) {
+    let name = key.algorithm_name().as_bytes();
+    let ident = key.ident().as_bytes();
+    let q = key.to_sec1_bytes();
 
     buf.push_u32_be((name.len() + ident.len() + q.len() + 12) as u32);
     buf.extend_ssh_string(name);

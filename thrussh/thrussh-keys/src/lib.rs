@@ -71,6 +71,7 @@ use std::fs::{File, OpenOptions};
 use std::io::{BufRead, BufReader, Read, Seek, SeekFrom, Write};
 use std::path::Path;
 
+pub mod ec;
 pub mod encoding;
 pub mod key;
 pub mod signature;
@@ -114,12 +115,16 @@ pub enum Error {
     AgentProtocolError,
     #[error("Agent failure")]
     AgentFailure,
+    #[error("Invalid signature")]
+    InvalidSignature,
     #[error(transparent)]
     IO(#[from] std::io::Error),
     #[error(transparent)]
     Openssl(#[from] openssl::error::ErrorStack),
     #[error(transparent)]
     Rsa(#[from] rsa::errors::Error),
+    #[error(transparent)]
+    Ecdsa(#[from] ecdsa::Error),
     #[error(transparent)]
     Pkcs1(#[from] rsa::pkcs1::Error),
     #[error("Base64 decoding error: {0}")]
@@ -145,7 +150,6 @@ const KEYTYPE_ED25519: &'static [u8] = b"ssh-ed25519";
 const KEYTYPE_RSA: &'static [u8] = b"ssh-rsa";
 const KEYTYPE_ECDSA_SHA2_NISTP256: &'static [u8] = b"ecdsa-sha2-nistp256";
 const KEYTYPE_ECDSA_SHA2_NISTP384: &'static [u8] = b"ecdsa-sha2-nistp384";
-const KEYTYPE_ECDSA_SHA2_NISTP521: &'static [u8] = b"ecdsa-sha2-nistp521";
 
 /// Load a public key from a file. Ed25519 and RSA keys are supported.
 ///
@@ -210,8 +214,8 @@ impl PublicKeyBase64 for key::PublicKey {
                 s.extend_ssh_mpint(&key.e().to_bytes_be());
                 s.extend_ssh_mpint(&key.n().to_bytes_be());
             }
-            key::PublicKey::Ec { ref key, ref typ } => {
-                write_ec_public_key(&mut s, key.0.ec_key().unwrap().as_ref(), typ);
+            key::PublicKey::Ec { ref key } => {
+                write_ec_public_key(&mut s, key);
             }
         }
         s
@@ -235,30 +239,18 @@ impl PublicKeyBase64 for key::KeyPair {
                 s.extend_ssh_mpint(&key.e().to_bytes_be());
                 s.extend_ssh_mpint(&key.n().to_bytes_be());
             }
-            key::KeyPair::Ec { ref key, ref typ } => {
-                write_ec_public_key(&mut s, key.as_ref(), typ);
+            key::KeyPair::Ec { ref key } => {
+                write_ec_public_key(&mut s, &key.to_public_key());
             }
         }
         s
     }
 }
 
-fn write_ec_public_key<T: openssl::pkey::HasPublic>(
-    buf: &mut Vec<u8>,
-    key: &openssl::ec::EcKeyRef<T>,
-    typ: &key::EcKeyType,
-) {
-    let name = typ.name().as_bytes();
-    let ident = typ.ident().as_bytes();
-    let mut cx = openssl::bn::BigNumContext::new().unwrap();
-    let q = key
-        .public_key()
-        .to_bytes(
-            key.group(),
-            openssl::ec::PointConversionForm::UNCOMPRESSED,
-            &mut cx,
-        )
-        .unwrap();
+fn write_ec_public_key(buf: &mut Vec<u8>, key: &ec::EcPublicKey) {
+    let name = key.algorithm_name().as_bytes();
+    let ident = key.ident().as_bytes();
+    let q = key.to_sec1_bytes();
 
     use encoding::Encoding;
     buf.extend_ssh_string(name);
@@ -677,17 +669,29 @@ KJaj7gc0n6gmKY6r0/Ddufy1JZ6eihBCSJ64RARBXeg2rZpyT+xxhMEZLK5meOeR
             let sig2 = key.sign_detached(buf).unwrap();
             match (sig, sig2) {
                 (
-                    key::Signature::Ecdsa { bytes, typ },
+                    key::Signature::Ecdsa {
+                        bytes,
+                        algorithm_name,
+                    },
                     key::Signature::Ecdsa {
                         bytes: bytes2,
-                        typ: typ2,
+                        algorithm_name: algorithm_name2,
                     },
                 ) => {
                     assert_ne!(bytes, bytes2);
-                    assert_eq!(typ, typ2);
+                    assert_eq!(algorithm_name, algorithm_name2);
                 }
                 _ => assert!(false),
             }
+        }
+        // Verify (r, s) = (0, 0) is an invalid signature. (CVE-2022-21449)
+        {
+            use crate::encoding::Encoding;
+            let mut sig = Vec::new();
+            sig.extend_ssh_string(&[0]);
+            sig.extend_ssh_string(&[0]);
+            let public = key.clone_public_key();
+            assert_eq!(false, public.verify_detached(buf, &sig));
         }
     }
 

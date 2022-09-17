@@ -117,7 +117,7 @@ impl Named for PublicKey {
         match self {
             &PublicKey::Ed25519(_) => ED25519.0,
             &PublicKey::RSA { .. } => SSH_RSA.0,
-            &PublicKey::Ec { ref typ, .. } => typ.name(),
+            &PublicKey::Ec { ref key } => key.algorithm_name(),
         }
     }
 }
@@ -127,7 +127,7 @@ impl Named for KeyPair {
         match self {
             &KeyPair::Ed25519 { .. } => ED25519.0,
             &KeyPair::RSA { ref hash, .. } => hash.name().0,
-            &KeyPair::Ec { ref typ, .. } => typ.name(),
+            &KeyPair::Ec { ref key } => key.algorithm_name(),
         }
     }
 }
