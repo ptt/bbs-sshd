@@ -4,8 +4,7 @@ use crate::key::SignatureHash;
 use crate::Error;
 use bit_vec::BitVec;
 use cipher::{BlockDecryptMut, BlockEncryptMut, KeyIvInit};
-use openssl::hash::MessageDigest;
-use openssl::rand::rand_bytes;
+use rand::Rng;
 use std;
 use std::borrow::Cow;
 use yasna;
@@ -92,7 +91,7 @@ fn asn1_read_pbkdf2(
             let oid = reader.next().read_oid()?;
             if oid.components().as_slice() == HMAC_SHA256 {
                 reader.next().read_null()?;
-                Ok(Ok(MessageDigest::sha256()))
+                Ok(Ok(pbkdf2::pbkdf2::<hmac::Hmac<sha2::Sha256>>))
             } else {
                 Ok(Err(Error::UnknownAlgorithm(oid)))
             }
@@ -268,7 +267,6 @@ fn test_read_write_pkcs8() {
     }
 }
 
-use openssl::pkcs5::pbkdf2_hmac;
 use yasna::models::ObjectIdentifier;
 /// Encode a password-protected PKCS#8-encoded private key.
 pub fn encode_pkcs8_encrypted(
@@ -277,17 +275,11 @@ pub fn encode_pkcs8_encrypted(
     key: &key::KeyPair,
 ) -> Result<Vec<u8>, Error> {
     let mut salt = [0; 64];
-    rand_bytes(&mut salt)?;
+    rand::thread_rng().fill(&mut salt);
     let mut iv = [0; 16];
-    rand_bytes(&mut iv)?;
+    rand::thread_rng().fill(&mut iv);
     let mut dkey = [0; 32]; // AES256-CBC
-    pbkdf2_hmac(
-        pass,
-        &salt,
-        rounds as usize,
-        MessageDigest::sha256(),
-        &mut dkey,
-    )?;
+    pbkdf2::pbkdf2::<hmac::Hmac<sha2::Sha256>>(pass, &salt, rounds, &mut dkey);
 
     let plaintext = encode_pkcs8(key);
     let ciphertext = cbc::Encryptor::<aes::Aes256>::new(&dkey.into(), &iv.into())
@@ -382,7 +374,7 @@ impl KeyDerivation {
                 ref salt,
                 rounds,
                 digest,
-            } => pbkdf2_hmac(password, salt, rounds as usize, digest, key)?,
+            } => digest(password, salt, rounds as u32, key),
         }
         Ok(())
     }
@@ -443,10 +435,12 @@ impl Encryption {
     }
 }
 
+type KdfFn = fn(password: &[u8], salt: &[u8], rounds: u32, res: &mut [u8]);
+
 enum KeyDerivation {
     Pbkdf2 {
         salt: Vec<u8>,
         rounds: u64,
-        digest: MessageDigest,
+        digest: KdfFn,
     },
 }

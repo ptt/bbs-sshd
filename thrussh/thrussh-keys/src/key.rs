@@ -199,8 +199,10 @@ impl PublicKey {
     /// Compute the key fingerprint, hashed with sha2-256.
     pub fn fingerprint(&self) -> String {
         use super::PublicKeyBase64;
+        use digest::Digest;
+        use sha2::Sha256;
         let key = self.public_key_bytes();
-        data_encoding::BASE64_NOPAD.encode(&openssl::sha::sha256(&key[..]))
+        data_encoding::BASE64_NOPAD.encode(&Sha256::digest(&key[..]))
     }
 
     pub fn set_algorithm(&mut self, algorithm: &[u8]) {

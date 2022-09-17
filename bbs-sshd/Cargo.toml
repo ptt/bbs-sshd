@@ -14,7 +14,6 @@ tokio = { version = "1.19.2", features = ["signal", "time"] }
 libc = "0.2.126"
 socket2 = { version = "0.4.4", features = ["all"] }
 log = { version = "0.4.17", features = ["serde", "release_max_level_trace"] }
-openssl = { version = "0.10.40", features = ["vendored"] }
 ssh-keys = "0.1.4"
 syslog = "6.0.1"
 fork = "0.1.19"

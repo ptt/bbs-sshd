@@ -120,8 +120,6 @@ pub enum Error {
     #[error(transparent)]
     IO(#[from] std::io::Error),
     #[error(transparent)]
-    Openssl(#[from] openssl::error::ErrorStack),
-    #[error(transparent)]
     Rsa(#[from] rsa::errors::Error),
     #[error(transparent)]
     Ecdsa(#[from] ecdsa::Error),

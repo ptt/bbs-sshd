@@ -423,9 +423,6 @@ pub enum Error {
     Join(#[from] tokio::task::JoinError),
 
     #[error(transparent)]
-    Openssl(#[from] openssl::error::ErrorStack),
-
-    #[error(transparent)]
     Elapsed(#[from] tokio::time::error::Elapsed),
 }
 
