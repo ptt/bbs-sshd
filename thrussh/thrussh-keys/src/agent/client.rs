@@ -109,20 +109,16 @@ impl<S: AsyncRead + AsyncWrite + Unpin> AgentClient<S> {
                 self.buf.extend_ssh_string(b"");
             }
             key::KeyPair::RSA { ref key, .. } => {
+                use rsa::PublicKeyParts;
                 self.buf.extend_ssh_string(b"ssh-rsa");
-                self.buf.extend_ssh_mpint(&key.n().to_vec());
-                self.buf.extend_ssh_mpint(&key.e().to_vec());
-                self.buf.extend_ssh_mpint(&key.d().to_vec());
-                if let Some(iqmp) = key.iqmp() {
-                    self.buf.extend_ssh_mpint(&iqmp.to_vec());
-                } else {
-                    let mut ctx = openssl::bn::BigNumContext::new()?;
-                    let mut iqmp = openssl::bn::BigNum::new()?;
-                    iqmp.mod_inverse(key.p().unwrap(), key.q().unwrap(), &mut ctx)?;
-                    self.buf.extend_ssh_mpint(&iqmp.to_vec());
-                }
-                self.buf.extend_ssh_mpint(&key.p().unwrap().to_vec());
-                self.buf.extend_ssh_mpint(&key.q().unwrap().to_vec());
+                self.buf.extend_ssh_mpint(&key.n().to_bytes_be());
+                self.buf.extend_ssh_mpint(&key.e().to_bytes_be());
+                self.buf.extend_ssh_mpint(&key.d().to_bytes_be());
+                self.buf
+                    .extend_ssh_mpint(&key.crt_coefficient().unwrap().to_bytes_be());
+                let primes = key.primes();
+                self.buf.extend_ssh_mpint(&primes[0].to_bytes_be());
+                self.buf.extend_ssh_mpint(&primes[1].to_bytes_be());
                 self.buf.extend_ssh_string(b"");
             }
             key::KeyPair::Ec { .. } => unimplemented!(),
@@ -244,16 +240,10 @@ impl<S: AsyncRead + AsyncWrite + Unpin> AgentClient<S> {
                 debug!("t = {:?}", std::str::from_utf8(t));
                 match t {
                     b"ssh-rsa" => {
-                        let e = r.read_mpint()?;
-                        let n = r.read_mpint()?;
-                        use openssl::bn::BigNum;
-                        use openssl::pkey::PKey;
-                        use openssl::rsa::Rsa;
+                        let e = rsa::BigUint::from_bytes_be(r.read_mpint()?);
+                        let n = rsa::BigUint::from_bytes_be(r.read_mpint()?);
                         keys.push(PublicKey::RSA {
-                            key: key::OpenSSLPKey(PKey::from_rsa(Rsa::from_public_components(
-                                BigNum::from_slice(n)?,
-                                BigNum::from_slice(e)?,
-                            )?)?),
+                            key: rsa::RsaPublicKey::new(n, e)?,
                             hash: SignatureHash::SHA2_512,
                         })
                     }
@@ -478,12 +468,13 @@ impl<S: AsyncRead + AsyncWrite + Unpin> AgentClient<S> {
 fn key_blob(public: &key::PublicKey, buf: &mut CryptoVec) {
     match *public {
         PublicKey::RSA { ref key, .. } => {
+            use rsa::PublicKeyParts;
+
             buf.extend(&[0, 0, 0, 0]);
             let len0 = buf.len();
             buf.extend_ssh_string(b"ssh-rsa");
-            let rsa = key.0.rsa().unwrap();
-            buf.extend_ssh_mpint(&rsa.e().to_vec());
-            buf.extend_ssh_mpint(&rsa.n().to_vec());
+            buf.extend_ssh_mpint(&key.e().to_bytes_be());
+            buf.extend_ssh_mpint(&key.n().to_bytes_be());
             let len1 = buf.len();
             BigEndian::write_u32(&mut buf[5..], (len1 - len0) as u32);
         }

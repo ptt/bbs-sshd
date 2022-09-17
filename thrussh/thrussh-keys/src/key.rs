@@ -93,6 +93,26 @@ impl SignatureHash {
             SignatureHash::SHA1 => MessageDigest::sha1(),
         }
     }
+
+    fn to_rsa_hash(&self) -> rsa::hash::Hash {
+        use rsa::hash::Hash;
+        match *self {
+            SignatureHash::SHA2_256 => Hash::SHA2_256,
+            SignatureHash::SHA2_384 => Hash::SHA2_384,
+            SignatureHash::SHA2_512 => Hash::SHA2_512,
+            SignatureHash::SHA1 => Hash::SHA1,
+        }
+    }
+
+    fn hash(&self, data: &[u8]) -> Vec<u8> {
+        use digest::Digest;
+        match *self {
+            SignatureHash::SHA2_256 => sha2::Sha256::new_with_prefix(data).finalize().to_vec(),
+            SignatureHash::SHA2_384 => sha2::Sha384::new_with_prefix(data).finalize().to_vec(),
+            SignatureHash::SHA2_512 => sha2::Sha512::new_with_prefix(data).finalize().to_vec(),
+            SignatureHash::SHA1 => sha1::Sha1::new_with_prefix(data).finalize().to_vec(),
+        }
+    }
 }
 
 /// Key type of an EC key
@@ -152,7 +172,7 @@ pub enum PublicKey {
     Ed25519(sodium::ed25519::PublicKey),
     #[doc(hidden)]
     RSA {
-        key: OpenSSLPKey,
+        key: rsa::RsaPublicKey,
         hash: SignatureHash,
     },
     #[doc(hidden)]
@@ -203,16 +223,10 @@ impl PublicKey {
                 {
                     return Err(Error::CouldNotReadKey.into());
                 }
-                let key_e = p.read_string()?;
-                let key_n = p.read_string()?;
-                use openssl::bn::BigNum;
-                use openssl::pkey::PKey;
-                use openssl::rsa::Rsa;
+                let e = rsa::BigUint::from_bytes_be(p.read_string()?);
+                let n = rsa::BigUint::from_bytes_be(p.read_string()?);
                 Ok(PublicKey::RSA {
-                    key: OpenSSLPKey(PKey::from_rsa(Rsa::from_public_components(
-                        BigNum::from_slice(key_n)?,
-                        BigNum::from_slice(key_e)?,
-                    )?)?),
+                    key: rsa::RsaPublicKey::new(n, e)?,
                     hash: {
                         if algo == b"rsa-sha2-256" {
                             SignatureHash::SHA2_256
@@ -244,13 +258,15 @@ impl PublicKey {
                 sodium::ed25519::verify_detached(&sig, buffer, &public)
             }
             &PublicKey::RSA { ref key, ref hash } => {
-                use openssl::sign::*;
-                let verify = || {
-                    let mut verifier = Verifier::new(hash.to_message_digest(), &key.0)?;
-                    verifier.update(buffer)?;
-                    verifier.verify(&sig)
-                };
-                verify().unwrap_or(false)
+                use rsa::PublicKey;
+                key.verify(
+                    rsa::padding::PaddingScheme::PKCS1v15Sign {
+                        hash: Some(hash.to_rsa_hash()),
+                    },
+                    &hash.hash(buffer),
+                    sig,
+                )
+                .is_ok()
             }
             &PublicKey::Ec { ref key, ref typ } => {
                 if let Ok(key) = key.0.ec_key() {
@@ -295,7 +311,7 @@ impl Verify for PublicKey {
 pub enum KeyPair {
     Ed25519(sodium::ed25519::SecretKey),
     RSA {
-        key: openssl::rsa::Rsa<Private>,
+        key: rsa::RsaPrivateKey,
         hash: SignatureHash,
     },
     Ec {
@@ -333,19 +349,10 @@ impl KeyPair {
                 public.key.clone_from_slice(&key.key[32..]);
                 PublicKey::Ed25519(public)
             }
-            &KeyPair::RSA { ref key, ref hash } => {
-                use openssl::pkey::PKey;
-                use openssl::rsa::Rsa;
-                let key = Rsa::from_public_components(
-                    key.n().to_owned().unwrap(),
-                    key.e().to_owned().unwrap(),
-                )
-                .unwrap();
-                PublicKey::RSA {
-                    key: OpenSSLPKey(PKey::from_rsa(key).unwrap()),
-                    hash: hash.clone(),
-                }
-            }
+            &KeyPair::RSA { ref key, ref hash } => PublicKey::RSA {
+                key: key.to_public_key(),
+                hash: hash.clone(),
+            },
             &KeyPair::Ec { ref key, ref typ } => {
                 use openssl::ec::EcKey;
                 use openssl::pkey::PKey;
@@ -379,7 +386,7 @@ impl KeyPair {
     }
 
     pub fn generate_rsa(bits: usize, hash: SignatureHash) -> Option<Self> {
-        let key = openssl::rsa::Rsa::generate(bits as u32).ok()?;
+        let key = rsa::RsaPrivateKey::new(&mut rand::thread_rng(), bits).ok()?;
         Some(KeyPair::RSA { key, hash })
     }
 
@@ -470,25 +477,16 @@ impl KeyPair {
 
 fn rsa_signature(
     hash: &SignatureHash,
-    key: &openssl::rsa::Rsa<Private>,
+    key: &rsa::RsaPrivateKey,
     b: &[u8],
 ) -> Result<Vec<u8>, Error> {
-    use openssl::pkey::*;
-    use openssl::rsa::*;
-    use openssl::sign::Signer;
-    let pkey = PKey::from_rsa(Rsa::from_private_components(
-        key.n().to_owned()?,
-        key.e().to_owned()?,
-        key.d().to_owned()?,
-        key.p().unwrap().to_owned()?,
-        key.q().unwrap().to_owned()?,
-        key.dmp1().unwrap().to_owned()?,
-        key.dmq1().unwrap().to_owned()?,
-        key.iqmp().unwrap().to_owned()?,
-    )?)?;
-    let mut signer = Signer::new(hash.to_message_digest(), &pkey)?;
-    signer.update(b)?;
-    Ok(signer.sign_to_vec()?)
+    key.sign(
+        rsa::padding::PaddingScheme::PKCS1v15Sign {
+            hash: Some(hash.to_rsa_hash()),
+        },
+        &hash.hash(b),
+    )
+    .map_err(Error::from)
 }
 
 fn ec_signature(
@@ -534,16 +532,10 @@ pub fn parse_public_key(p: &[u8]) -> Result<PublicKey, Error> {
         }
     }
     if t == crate::KEYTYPE_RSA {
-        let e = pos.read_string()?;
-        let n = pos.read_string()?;
-        use openssl::bn::*;
-        use openssl::pkey::*;
-        use openssl::rsa::*;
+        let e = rsa::BigUint::from_bytes_be(pos.read_string()?);
+        let n = rsa::BigUint::from_bytes_be(pos.read_string()?);
         return Ok(PublicKey::RSA {
-            key: OpenSSLPKey(PKey::from_rsa(Rsa::from_public_components(
-                BigNum::from_slice(n)?,
-                BigNum::from_slice(e)?,
-            )?)?),
+            key: rsa::RsaPublicKey::new(n, e)?,
             hash: SignatureHash::SHA2_256,
         });
     }

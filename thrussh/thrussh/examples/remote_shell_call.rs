@@ -43,8 +43,10 @@ impl Session {
         user: impl Into<String>,
         addr: impl std::net::ToSocketAddrs,
     ) -> Result<Self> {
+        use rsa::pkcs1::DecodeRsaPrivateKey;
+
         let key_pair = key::KeyPair::RSA {
-            key: openssl::rsa::Rsa::private_key_from_pem(pem)?,
+            key: rsa::RsaPrivateKey::from_pkcs1_pem(std::str::from_utf8(pem).expect("read key"))?,
             hash: key::SignatureHash::SHA2_512,
         };
         let config = client::Config::default();

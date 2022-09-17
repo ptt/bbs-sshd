@@ -254,41 +254,29 @@ impl<S: AsyncRead + AsyncWrite + Send + Unpin + 'static, A: Agent + Send + 'stat
                 (self.buf[pos0..pos1].to_vec(), key::KeyPair::Ed25519(secret))
             }
             b"ssh-rsa" => {
-                use openssl::bn::{BigNum, BigNumContext};
-                use openssl::rsa::Rsa;
-                let n = r.read_mpint()?;
-                let e = r.read_mpint()?;
-                let d = BigNum::from_slice(r.read_mpint()?)?;
-                let q_inv = r.read_mpint()?;
-                let p = BigNum::from_slice(r.read_mpint()?)?;
-                let q = BigNum::from_slice(r.read_mpint()?)?;
-                let (dp, dq) = {
-                    let one = BigNum::from_u32(1)?;
-                    let p1 = p.as_ref() - one.as_ref();
-                    let q1 = q.as_ref() - one.as_ref();
-                    let mut context = BigNumContext::new()?;
-                    let mut dp = BigNum::new()?;
-                    let mut dq = BigNum::new()?;
-                    dp.checked_rem(&d, &p1, &mut context)?;
-                    dq.checked_rem(&d, &q1, &mut context)?;
-                    (dp, dq)
-                };
+                use rsa::BigUint;
+                let n = BigUint::from_bytes_be(r.read_mpint()?);
+                let e = BigUint::from_bytes_be(r.read_mpint()?);
+                let d = BigUint::from_bytes_be(r.read_mpint()?);
+                let iqmp = BigUint::from_bytes_be(r.read_mpint()?);
+                let p = BigUint::from_bytes_be(r.read_mpint()?);
+                let q = BigUint::from_bytes_be(r.read_mpint()?);
                 let _comment = r.read_string()?;
-                let key = Rsa::from_private_components(
-                    BigNum::from_slice(n)?,
-                    BigNum::from_slice(e)?,
-                    d,
-                    p,
-                    q,
-                    dp,
-                    dq,
-                    BigNum::from_slice(&q_inv)?,
-                )?;
+
+                let mut key =
+                    rsa::RsaPrivateKey::from_components(n.clone(), e.clone(), d, vec![p, q]);
+                key.validate()?;
+                key.precompute()?;
+
+                let computed_iqmp = key.crt_coefficient().unwrap();
+                if computed_iqmp != iqmp {
+                    return Err(rsa::errors::Error::InvalidCoefficient.into());
+                }
 
                 let len0 = writebuf.len();
                 writebuf.extend_ssh_string(b"ssh-rsa");
-                writebuf.extend_ssh_mpint(&e);
-                writebuf.extend_ssh_mpint(&n);
+                writebuf.extend_ssh_mpint(&e.to_bytes_be());
+                writebuf.extend_ssh_mpint(&n.to_bytes_be());
                 let blob = writebuf[len0..].to_vec();
                 writebuf.resize(len0);
                 writebuf.push(msg::SUCCESS);

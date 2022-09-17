@@ -4,9 +4,7 @@ use crate::key::SignatureHash;
 use crate::Error;
 use bit_vec::BitVec;
 use openssl::hash::MessageDigest;
-use openssl::pkey::Private;
 use openssl::rand::rand_bytes;
-use openssl::rsa::Rsa;
 use openssl::symm::{decrypt, encrypt, Cipher};
 use std;
 use std::borrow::Cow;
@@ -161,7 +159,7 @@ fn read_key_v1(reader: &mut BERReaderSeq) -> Result<key::KeyPair, Error> {
     }
 }
 
-fn write_key_v0(writer: &mut yasna::DERWriterSeq, key: &Rsa<Private>) {
+fn write_key_v0(writer: &mut yasna::DERWriterSeq, key: &rsa::RsaPrivateKey) {
     writer.next().write_u32(0);
     // write OID
     writer.next().write_sequence(|writer| {
@@ -169,33 +167,44 @@ fn write_key_v0(writer: &mut yasna::DERWriterSeq, key: &Rsa<Private>) {
         writer.next().write_null()
     });
     let bytes = yasna::construct_der(|writer| {
+        use rsa::PublicKeyParts;
         writer.write_sequence(|writer| {
-            writer.next().write_u32(0);
             use num_bigint::BigUint;
+            use num_integer::Integer;
+            use num_traits::identities::One;
+
+            let primes = key.primes();
+            let (p, q) = (&primes[0], &primes[1]);
+            let one = &rsa::BigUint::one();
+            let dmp1 = key.d().mod_floor(&(p.clone() - one)); // d mod p-1
+            let dmq1 = key.d().mod_floor(&(q.clone() - one)); // d mod q-1
+            let iqmp = key.crt_coefficient().unwrap();
+
+            writer.next().write_u32(0);
             writer
                 .next()
-                .write_biguint(&BigUint::from_bytes_be(&key.n().to_vec()));
+                .write_biguint(&BigUint::from_bytes_be(&key.n().to_bytes_be()));
             writer
                 .next()
-                .write_biguint(&BigUint::from_bytes_be(&key.e().to_vec()));
+                .write_biguint(&BigUint::from_bytes_be(&key.e().to_bytes_be()));
             writer
                 .next()
-                .write_biguint(&BigUint::from_bytes_be(&key.d().to_vec()));
+                .write_biguint(&BigUint::from_bytes_be(&key.d().to_bytes_be()));
             writer
                 .next()
-                .write_biguint(&BigUint::from_bytes_be(&key.p().unwrap().to_vec()));
+                .write_biguint(&BigUint::from_bytes_be(&p.to_bytes_be()));
             writer
                 .next()
-                .write_biguint(&BigUint::from_bytes_be(&key.q().unwrap().to_vec()));
+                .write_biguint(&BigUint::from_bytes_be(&q.to_bytes_be()));
             writer
                 .next()
-                .write_biguint(&BigUint::from_bytes_be(&key.dmp1().unwrap().to_vec()));
+                .write_biguint(&BigUint::from_bytes_be(&dmp1.to_bytes_be()));
             writer
                 .next()
-                .write_biguint(&BigUint::from_bytes_be(&key.dmq1().unwrap().to_vec()));
+                .write_biguint(&BigUint::from_bytes_be(&dmq1.to_bytes_be()));
             writer
                 .next()
-                .write_biguint(&BigUint::from_bytes_be(&key.iqmp().unwrap().to_vec()));
+                .write_biguint(&BigUint::from_bytes_be(&iqmp.to_bytes_be()));
         })
     });
     writer.next().write_bytes(&bytes);
@@ -209,24 +218,28 @@ fn read_key_v0(reader: &mut BERReaderSeq) -> Result<key::KeyPair, Error> {
     })?;
     if oid.components().as_slice() == RSA {
         let seq = &reader.next().read_bytes()?;
-        let rsa: Result<Rsa<Private>, Error> = yasna::parse_der(seq, |reader| {
+        let rsa: Result<rsa::RsaPrivateKey, Error> = yasna::parse_der(seq, |reader| {
             reader.read_sequence(|reader| {
                 let version = reader.next().read_u32()?;
                 if version != 0 {
                     return Ok(Err(Error::CouldNotReadKey.into()));
                 }
-                use openssl::bn::BigNum;
-                let mut read_key = || -> Result<Rsa<Private>, Error> {
-                    Ok(Rsa::from_private_components(
-                        BigNum::from_slice(&reader.next().read_biguint()?.to_bytes_be())?,
-                        BigNum::from_slice(&reader.next().read_biguint()?.to_bytes_be())?,
-                        BigNum::from_slice(&reader.next().read_biguint()?.to_bytes_be())?,
-                        BigNum::from_slice(&reader.next().read_biguint()?.to_bytes_be())?,
-                        BigNum::from_slice(&reader.next().read_biguint()?.to_bytes_be())?,
-                        BigNum::from_slice(&reader.next().read_biguint()?.to_bytes_be())?,
-                        BigNum::from_slice(&reader.next().read_biguint()?.to_bytes_be())?,
-                        BigNum::from_slice(&reader.next().read_biguint()?.to_bytes_be())?,
-                    )?)
+                let mut read_key = || -> Result<rsa::RsaPrivateKey, Error> {
+                    let (n, e, d, p, q, _dmp1, _dmq1, _iqmp) = (
+                        rsa::BigUint::from_bytes_be(&reader.next().read_biguint()?.to_bytes_be()),
+                        rsa::BigUint::from_bytes_be(&reader.next().read_biguint()?.to_bytes_be()),
+                        rsa::BigUint::from_bytes_be(&reader.next().read_biguint()?.to_bytes_be()),
+                        rsa::BigUint::from_bytes_be(&reader.next().read_biguint()?.to_bytes_be()),
+                        rsa::BigUint::from_bytes_be(&reader.next().read_biguint()?.to_bytes_be()),
+                        rsa::BigUint::from_bytes_be(&reader.next().read_biguint()?.to_bytes_be()),
+                        rsa::BigUint::from_bytes_be(&reader.next().read_biguint()?.to_bytes_be()),
+                        rsa::BigUint::from_bytes_be(&reader.next().read_biguint()?.to_bytes_be()),
+                    );
+                    let mut key = rsa::RsaPrivateKey::from_components(n, e, d, vec![p, q]);
+                    key.validate()?;
+                    key.precompute()?;
+                    // TODO: Check dmp1, dmq1, iqmp
+                    Ok(key)
                 };
                 Ok(read_key())
             })

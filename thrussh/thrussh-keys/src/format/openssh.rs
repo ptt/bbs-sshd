@@ -5,6 +5,7 @@ use crate::Error;
 use cryptovec::CryptoVec;
 use openssl::bn::BigNum;
 use openssl::symm::{Cipher, Crypter, Mode};
+use rsa::{BigUint, RsaPrivateKey};
 
 /// Decode a secret key given in the OpenSSH format, deciphering it if
 /// needed using the supplied password.
@@ -41,29 +42,22 @@ pub fn decode_openssh(secret: &[u8], password: Option<&[u8]>) -> Result<key::Key
                 secret.key.clone_from_slice(seckey);
                 return Ok(key::KeyPair::Ed25519(secret));
             } else if key_type == crate::KEYTYPE_RSA {
-                let n = BigNum::from_slice(position.read_string()?)?;
-                let e = BigNum::from_slice(position.read_string()?)?;
-                let d = BigNum::from_slice(position.read_string()?)?;
-                let iqmp = BigNum::from_slice(position.read_string()?)?;
-                let p = BigNum::from_slice(position.read_string()?)?;
-                let q = BigNum::from_slice(position.read_string()?)?;
+                let n = BigUint::from_bytes_be(position.read_string()?);
+                let e = BigUint::from_bytes_be(position.read_string()?);
+                let d = BigUint::from_bytes_be(position.read_string()?);
+                let iqmp = BigUint::from_bytes_be(position.read_string()?);
+                let p = BigUint::from_bytes_be(position.read_string()?);
+                let q = BigUint::from_bytes_be(position.read_string()?);
 
-                let mut ctx = openssl::bn::BigNumContext::new()?;
-                let un = openssl::bn::BigNum::from_u32(1)?;
-                let mut p1 = openssl::bn::BigNum::new()?;
-                let mut q1 = openssl::bn::BigNum::new()?;
-                p1.checked_sub(&p, &un)?;
-                q1.checked_sub(&q, &un)?;
-                let mut dmp1 = openssl::bn::BigNum::new()?; // d mod p-1
-                dmp1.checked_rem(&d, &p1, &mut ctx)?;
-                let mut dmq1 = openssl::bn::BigNum::new()?; // d mod q-1
-                dmq1.checked_rem(&d, &q1, &mut ctx)?;
+                let mut key = RsaPrivateKey::from_components(n, e, d, vec![p, q]);
+                key.validate()?;
+                key.precompute()?;
 
-                let key = openssl::rsa::RsaPrivateKeyBuilder::new(n, e, d)?
-                    .set_factors(p, q)?
-                    .set_crt_params(dmp1, dmq1, iqmp)?
-                    .build();
-                key.check_key().unwrap();
+                let computed_iqmp = key.crt_coefficient().unwrap();
+                if computed_iqmp != iqmp {
+                    return Err(rsa::errors::Error::InvalidCoefficient.into());
+                }
+
                 return Ok(key::KeyPair::RSA {
                     key,
                     hash: key::SignatureHash::SHA2_512,

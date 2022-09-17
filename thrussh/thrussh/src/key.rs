@@ -30,9 +30,9 @@ impl PubKey for PublicKey {
                 buffer.extend_ssh_string(&public.key);
             }
             &PublicKey::RSA { ref key, .. } => {
-                let rsa = key.0.rsa().unwrap();
-                let e = rsa.e().to_vec();
-                let n = rsa.n().to_vec();
+                use rsa::PublicKeyParts;
+                let e = key.e().to_bytes_be();
+                let n = key.n().to_bytes_be();
                 buffer.push_u32_be((4 + SSH_RSA.0.len() + mpint_len(&n) + mpint_len(&e)) as u32);
                 buffer.extend_ssh_string(SSH_RSA.0.as_bytes());
                 buffer.extend_ssh_mpint(&e);
@@ -55,8 +55,9 @@ impl PubKey for KeyPair {
                 buffer.extend_ssh_string(public);
             }
             &KeyPair::RSA { ref key, .. } => {
-                let e = key.e().to_vec();
-                let n = key.n().to_vec();
+                use rsa::PublicKeyParts;
+                let e = key.e().to_bytes_be();
+                let n = key.n().to_bytes_be();
                 buffer.push_u32_be((4 + SSH_RSA.0.len() + mpint_len(&n) + mpint_len(&e)) as u32);
                 buffer.extend_ssh_string(SSH_RSA.0.as_bytes());
                 buffer.extend_ssh_mpint(&e);

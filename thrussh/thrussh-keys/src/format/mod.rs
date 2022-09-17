@@ -2,7 +2,6 @@ use super::is_base64_char;
 use crate::key;
 use crate::Error;
 use data_encoding::{BASE64_MIME, HEXLOWER_PERMISSIVE};
-use openssl::rsa::Rsa;
 use std::io::Write;
 
 pub mod openssh;
@@ -109,8 +108,9 @@ pub fn encode_pkcs8_pem_encrypted<W: Write>(
 }
 
 fn decode_rsa(secret: &[u8]) -> Result<key::KeyPair, Error> {
+    use rsa::pkcs1::DecodeRsaPrivateKey;
     Ok(key::KeyPair::RSA {
-        key: Rsa::private_key_from_der(secret)?,
+        key: rsa::RsaPrivateKey::from_pkcs1_der(secret)?,
         hash: key::SignatureHash::SHA2_256,
     })
 }

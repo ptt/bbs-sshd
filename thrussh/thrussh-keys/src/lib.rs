@@ -118,6 +118,10 @@ pub enum Error {
     IO(#[from] std::io::Error),
     #[error(transparent)]
     Openssl(#[from] openssl::error::ErrorStack),
+    #[error(transparent)]
+    Rsa(#[from] rsa::errors::Error),
+    #[error(transparent)]
+    Pkcs1(#[from] rsa::pkcs1::Error),
     #[error("Base64 decoding error: {0}")]
     Decode(#[from] data_encoding::DecodeError),
     #[error("ASN1 decoding error: {0}")]
@@ -198,11 +202,13 @@ impl PublicKeyBase64 for key::PublicKey {
             }
             key::PublicKey::RSA { ref key, .. } => {
                 use encoding::Encoding;
+                use rsa::PublicKeyParts;
+
                 let name = b"ssh-rsa";
                 s.write_u32::<BigEndian>(name.len() as u32).unwrap();
                 s.extend_from_slice(name);
-                s.extend_ssh_mpint(&key.0.rsa().unwrap().e().to_vec());
-                s.extend_ssh_mpint(&key.0.rsa().unwrap().n().to_vec());
+                s.extend_ssh_mpint(&key.e().to_bytes_be());
+                s.extend_ssh_mpint(&key.n().to_bytes_be());
             }
             key::PublicKey::Ec { ref key, ref typ } => {
                 write_ec_public_key(&mut s, key.0.ec_key().unwrap().as_ref(), typ);
@@ -224,9 +230,10 @@ impl PublicKeyBase64 for key::KeyPair {
                 s.extend_from_slice(&public);
             }
             key::KeyPair::RSA { ref key, .. } => {
+                use rsa::PublicKeyParts;
                 s.extend_ssh_string(self.name().as_bytes());
-                s.extend_ssh_mpint(&key.e().to_vec());
-                s.extend_ssh_mpint(&key.n().to_vec());
+                s.extend_ssh_mpint(&key.e().to_bytes_be());
+                s.extend_ssh_mpint(&key.n().to_bytes_be());
             }
             key::KeyPair::Ec { ref key, ref typ } => {
                 write_ec_public_key(&mut s, key.as_ref(), typ);

@@ -57,6 +57,7 @@ tokio = { version = "1.19.2", features = [ "io-util", "rt-multi-thread", "time",
 futures = "0.3.21"
 thiserror = "1.0.31"
 flate2 = { version = "1.0.24", optional = true }
+rsa = "0.6.1"
 
 [dev-dependencies]
 env_logger = "0.9.0"
