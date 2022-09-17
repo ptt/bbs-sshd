@@ -281,7 +281,7 @@ impl KeyPair {
     }
 
     pub fn generate_rsa(bits: usize, hash: SignatureHash) -> Option<Self> {
-        let key = rsa::RsaPrivateKey::new(&mut rand::thread_rng(), bits).ok()?;
+        let key = rsa::RsaPrivateKey::new(&mut crate::key::safe_rng(), bits).ok()?;
         Some(KeyPair::RSA { key, hash })
     }
 
@@ -428,4 +428,9 @@ pub fn parse_public_key(p: &[u8]) -> Result<PublicKey, Error> {
         return Ok(PublicKey::Ec { key });
     }
     Err(Error::CouldNotReadKey.into())
+}
+
+/// Obtain a cryptographic-safe random number generator.
+pub fn safe_rng() -> impl rand::CryptoRng + rand::RngCore {
+    rand::thread_rng()
 }

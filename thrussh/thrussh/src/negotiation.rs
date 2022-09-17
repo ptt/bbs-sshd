@@ -18,7 +18,6 @@ use thrussh_keys::key;
 // use super::mac; // unimplemented
 use crate::compression::*;
 use cryptovec::CryptoVec;
-use rand::Rng;
 use thrussh_keys::encoding::{Encoding, Reader};
 use thrussh_keys::key::{KeyPair, PublicKey};
 
@@ -265,11 +264,13 @@ impl Select for Client {
 }
 
 pub fn write_kex(prefs: &Preferred, buf: &mut CryptoVec) -> Result<(), Error> {
+    use rand::RngCore;
+
     // buf.clear();
     buf.push(msg::KEXINIT);
 
     let mut cookie = [0; 16];
-    rand::thread_rng().fill(&mut cookie);
+    key::safe_rng().fill_bytes(&mut cookie);
 
     buf.extend(&cookie); // cookie
     buf.extend_list(prefs.kex.iter()); // kex algo

@@ -124,11 +124,11 @@ impl EcPrivateKey {
         use ecdsa::signature::RandomizedSigner;
         match self {
             Self::P256(key) => key
-                .try_sign_with_rng(rand::thread_rng(), msg)
+                .try_sign_with_rng(crate::key::safe_rng(), msg)
                 .map(|sig| sig.split_bytes())
                 .map(|(r, s)| (r.to_vec(), s.to_vec())),
             Self::P384(key) => key
-                .try_sign_with_rng(rand::thread_rng(), msg)
+                .try_sign_with_rng(crate::key::safe_rng(), msg)
                 .map(|sig| sig.split_bytes())
                 .map(|(r, s)| (r.to_vec(), s.to_vec())),
         }

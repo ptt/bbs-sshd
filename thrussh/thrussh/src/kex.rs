@@ -304,7 +304,7 @@ pub mod dh {
     use num_traits::identities::One;
     use rand::Rng;
     use thrussh_keys::encoding::{Encoding, Reader};
-    use thrussh_keys::key::{KeyPair, SignatureHash};
+    use thrussh_keys::key::{safe_rng, KeyPair, SignatureHash};
 
     pub struct Algorithm {
         p: BigUint,
@@ -353,7 +353,7 @@ pub mod dh {
 
             // S generates a random number y (0 < y < q)
             // q = p-1 for prime p
-            let y = rand::thread_rng().gen_range(0u8.into()..(self.p.clone() - BigUint::one()));
+            let y = safe_rng().gen_range(0u8.into()..(self.p.clone() - BigUint::one()));
 
             // S computes server_pubkey = f = g^y mod p
             let server_pubkey = self.g.modpow(&y, &self.p);
@@ -481,6 +481,8 @@ fn checked_clone(dst: &mut [u8], src: &[u8]) -> Result<(), crate::Error> {
 }
 
 mod curve25519 {
+    use thrussh_keys::key::safe_rng;
+
     pub use curve25519_dalek_ng::montgomery::MontgomeryPoint as GroupElement;
     pub use curve25519_dalek_ng::scalar::Scalar;
 
@@ -493,6 +495,6 @@ mod curve25519 {
     }
 
     pub fn scalar_rand() -> Scalar {
-        Scalar::random(&mut rand::thread_rng())
+        Scalar::random(&mut safe_rng())
     }
 }

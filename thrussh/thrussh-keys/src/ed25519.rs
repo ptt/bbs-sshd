@@ -51,7 +51,7 @@ pub struct Signature(pub [u8; SIGNATURE_BYTES]);
 pub fn keypair() -> SecretKey {
     use rand::RngCore;
     let mut sk = [0u8; 32];
-    rand::thread_rng().fill_bytes(&mut sk[..]);
+    crate::key::safe_rng().fill_bytes(&mut sk[..]);
     let secret = ed25519_dalek::SecretKey::from_bytes(&sk[..]).unwrap();
     let public = ed25519_dalek::PublicKey::from(&secret);
     SecretKey(ed25519_dalek::Keypair { public, secret })

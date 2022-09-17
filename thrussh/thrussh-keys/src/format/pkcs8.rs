@@ -270,9 +270,9 @@ pub fn encode_pkcs8_encrypted(
     key: &key::KeyPair,
 ) -> Result<Vec<u8>, Error> {
     let mut salt = [0; 64];
-    rand::thread_rng().fill(&mut salt);
+    crate::key::safe_rng().fill(&mut salt);
     let mut iv = [0; 16];
-    rand::thread_rng().fill(&mut iv);
+    crate::key::safe_rng().fill(&mut iv);
     let mut dkey = [0; 32]; // AES256-CBC
     pbkdf2::pbkdf2::<hmac::Hmac<sha2::Sha256>>(pass, &salt, rounds, &mut dkey);
 
