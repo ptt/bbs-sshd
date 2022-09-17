@@ -285,6 +285,7 @@ mod kex;
 mod key;
 mod msg;
 mod negotiation;
+mod rfc3526;
 mod ssh_read;
 mod sshbuffer;
 

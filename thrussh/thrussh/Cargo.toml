@@ -59,6 +59,9 @@ thiserror = "1.0.31"
 flate2 = { version = "1.0.24", optional = true }
 rand = "0.8.5"
 rsa = "0.6.1"
+hex-literal = "0.3.4"
+num-bigint-dig = "0.8.1"
+num-traits = "0.2.15"
 
 [dev-dependencies]
 env_logger = "0.9.0"

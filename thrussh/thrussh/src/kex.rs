@@ -301,15 +301,17 @@ pub mod dh {
     use super::DigestBytes;
     use crate::key::PubKey;
     use crate::session::Exchange;
-    use crate::{key, msg};
+    use crate::{key, msg, rfc3526};
     use cryptovec::CryptoVec;
-    use openssl::bn::{BigNum, BigNumContext};
+    use num_bigint_dig::BigUint;
+    use num_traits::identities::One;
+    use rand::Rng;
     use thrussh_keys::encoding::{Encoding, Reader};
     use thrussh_keys::key::{KeyPair, SignatureHash};
 
     pub struct Algorithm {
-        p: BigNum,
-        g: BigNum,
+        p: BigUint,
+        g: BigUint,
         digest: SignatureHash,
     }
 
@@ -326,16 +328,16 @@ pub mod dh {
     impl Algorithm {
         pub fn new_group14_sha1() -> Result<Self, crate::Error> {
             Ok(Algorithm {
-                p: BigNum::get_rfc3526_prime_2048()?,
-                g: BigNum::from_u32(2)?,
+                p: rfc3526::prime_2048(),
+                g: 2u8.into(),
                 digest: SignatureHash::SHA1,
             })
         }
 
         pub fn new_group14_sha256() -> Result<Self, crate::Error> {
             Ok(Algorithm {
-                p: BigNum::get_rfc3526_prime_2048()?,
-                g: BigNum::from_u32(2)?,
+                p: rfc3526::prime_2048(),
+                g: 2u8.into(),
                 digest: SignatureHash::SHA2_256,
             })
         }
@@ -350,24 +352,17 @@ pub mod dh {
             let mut r = payload.reader(0);
             super::check_packet_type(r.read_byte()?, msg::KEXDH_INIT)?;
 
-            let client_pubkey = BigNum::from_slice(r.read_mpint()?)?;
-
-            let mut cx = BigNumContext::new()?;
+            let client_pubkey = BigUint::from_bytes_be(r.read_mpint()?);
 
             // S generates a random number y (0 < y < q)
             // q = p-1 for prime p
-            let mut q = self.p.to_owned()?;
-            q.sub_word(1)?;
-            let mut y = BigNum::new()?;
-            q.rand_range(&mut y)?;
+            let y = rand::thread_rng().gen_range(0u8.into()..(self.p.clone() - BigUint::one()));
 
             // S computes server_pubkey = f = g^y mod p
-            let mut server_pubkey = BigNum::new()?;
-            server_pubkey.mod_exp(&self.g, &y, &self.p, &mut cx)?;
+            let server_pubkey = self.g.modpow(&y, &self.p);
 
             // S computes shared_secret = K = e^y mod p
-            let mut shared_secret = BigNum::new()?;
-            shared_secret.mod_exp(&client_pubkey, &y, &self.p, &mut cx)?;
+            let shared_secret = client_pubkey.modpow(&y, &self.p);
 
             let exchange_hash = self.compute_exchange_hash(
                 key,
@@ -381,12 +376,12 @@ pub mod dh {
             reply.clear();
             reply.push(msg::KEXDH_REPLY);
             key.push_to(reply);
-            reply.extend_ssh_mpint(&server_pubkey.to_vec());
+            reply.extend_ssh_mpint(&server_pubkey.to_bytes_be());
             key.add_signature(reply, &exchange_hash)?;
 
             Ok(super::Output {
                 exchange_hash,
-                shared_secret: shared_secret.to_vec().into(),
+                shared_secret: shared_secret.to_bytes_be().into(),
                 digest: self.digest.clone(),
             })
         }
@@ -395,9 +390,9 @@ pub mod dh {
             &self,
             key: &K,
             exchange: &Exchange,
-            client_pubkey: &BigNum,
-            server_pubkey: &BigNum,
-            shared_secret: &BigNum,
+            client_pubkey: &BigUint,
+            server_pubkey: &BigUint,
+            shared_secret: &BigUint,
         ) -> Result<DigestBytes, crate::Error> {
             super::BUFFER.with(|buffer| {
                 let mut buffer = buffer.borrow_mut();
@@ -408,9 +403,9 @@ pub mod dh {
                 buffer.extend_ssh_string(&exchange.client_kex_init);
                 buffer.extend_ssh_string(&exchange.server_kex_init);
                 key.push_to(&mut buffer);
-                buffer.extend_ssh_mpint(&client_pubkey.to_vec());
-                buffer.extend_ssh_mpint(&server_pubkey.to_vec());
-                buffer.extend_ssh_mpint(&shared_secret.to_vec());
+                buffer.extend_ssh_mpint(&client_pubkey.to_bytes_be());
+                buffer.extend_ssh_mpint(&server_pubkey.to_bytes_be());
+                buffer.extend_ssh_mpint(&shared_secret.to_bytes_be());
                 Ok(self.digest.hash(&buffer))
             })
         }
