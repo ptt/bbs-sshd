@@ -139,7 +139,7 @@ pub mod ecdh {
     use crate::session::Exchange;
     use crate::{key, msg};
     use cryptovec::CryptoVec;
-    use openssl::rand::rand_bytes;
+    use rand::Rng;
     use sodium::scalarmult::*;
     use thrussh_keys::encoding::{Encoding, Reader};
     use thrussh_keys::key::{KeyPair, PublicKey, SignatureHash};
@@ -188,7 +188,7 @@ pub mod ecdh {
             debug!("client_pubkey: {:?}", client_pubkey);
 
             let mut server_secret = Scalar([0; 32]);
-            rand_bytes(&mut server_secret.0)?;
+            rand::thread_rng().fill(&mut server_secret.0);
             let server_pubkey = scalarmult_base(&server_secret);
             let shared_secret = scalarmult(&server_secret, &client_pubkey);
             let exchange_hash = self.compute_exchange_hash(
@@ -215,7 +215,7 @@ pub mod ecdh {
 
         pub fn client_dh_init(&mut self, msg: &mut CryptoVec) -> Result<(), crate::Error> {
             let mut client_secret = Scalar([0; 32]);
-            rand_bytes(&mut client_secret.0)?;
+            rand::thread_rng().fill(&mut client_secret.0);
             let client_pubkey = scalarmult_base(&client_secret);
 
             // fill exchange.

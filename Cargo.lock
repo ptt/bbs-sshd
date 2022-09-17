@@ -1231,6 +1231,7 @@ dependencies = [
  "hmac",
  "log",
  "openssl",
+ "rand 0.8.5",
  "rsa",
  "sha-1",
  "sha2",
