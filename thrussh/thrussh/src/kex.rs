@@ -134,13 +134,12 @@ impl Output {
 }
 
 pub mod ecdh {
+    use super::curve25519::*;
     use super::DigestBytes;
     use crate::key::PubKey;
     use crate::session::Exchange;
     use crate::{key, msg};
     use cryptovec::CryptoVec;
-    use rand::Rng;
-    use sodium::scalarmult::*;
     use thrussh_keys::encoding::{Encoding, Reader};
     use thrussh_keys::key::{KeyPair, PublicKey, SignatureHash};
 
@@ -187,8 +186,7 @@ pub mod ecdh {
             super::checked_clone(&mut client_pubkey.0, r.read_string()?)?;
             debug!("client_pubkey: {:?}", client_pubkey);
 
-            let mut server_secret = Scalar([0; 32]);
-            rand::thread_rng().fill(&mut server_secret.0);
+            let server_secret = scalar_rand();
             let server_pubkey = scalarmult_base(&server_secret);
             let shared_secret = scalarmult(&server_secret, &client_pubkey);
             let exchange_hash = self.compute_exchange_hash(
@@ -214,8 +212,7 @@ pub mod ecdh {
         }
 
         pub fn client_dh_init(&mut self, msg: &mut CryptoVec) -> Result<(), crate::Error> {
-            let mut client_secret = Scalar([0; 32]);
-            rand::thread_rng().fill(&mut client_secret.0);
+            let client_secret = scalar_rand();
             let client_pubkey = scalarmult_base(&client_secret);
 
             // fill exchange.
@@ -480,5 +477,22 @@ fn checked_clone(dst: &mut [u8], src: &[u8]) -> Result<(), crate::Error> {
     } else {
         dst.clone_from_slice(src);
         Ok(())
+    }
+}
+
+mod curve25519 {
+    pub use curve25519_dalek_ng::montgomery::MontgomeryPoint as GroupElement;
+    pub use curve25519_dalek_ng::scalar::Scalar;
+
+    pub fn scalarmult_base(n: &Scalar) -> GroupElement {
+        n * curve25519_dalek_ng::constants::X25519_BASEPOINT
+    }
+
+    pub fn scalarmult(n: &Scalar, p: &GroupElement) -> GroupElement {
+        n * p
+    }
+
+    pub fn scalar_rand() -> Scalar {
+        Scalar::random(&mut rand::thread_rng())
     }
 }

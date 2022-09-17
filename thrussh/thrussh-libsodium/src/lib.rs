@@ -95,31 +95,3 @@ pub mod ed25519 {
         sig
     }
 }
-
-pub mod scalarmult {
-    use super::*;
-    pub const BYTES: usize = 32;
-
-    #[derive(Debug)]
-    pub struct Scalar(pub [u8; BYTES]);
-    #[derive(Debug)]
-    pub struct GroupElement(pub [u8; BYTES]);
-
-    pub fn scalarmult_base(n: &Scalar) -> GroupElement {
-        lazy_static::initialize(&super::SODIUM);
-        let mut q = GroupElement([0; BYTES]);
-        unsafe {
-            crypto_scalarmult_curve25519_base(q.0.as_mut_ptr(), n.0.as_ptr());
-        }
-        q
-    }
-
-    pub fn scalarmult(n: &Scalar, p: &GroupElement) -> GroupElement {
-        lazy_static::initialize(&super::SODIUM);
-        let mut q = GroupElement([0; BYTES]);
-        unsafe {
-            crypto_scalarmult_curve25519(q.0.as_mut_ptr(), n.0.as_ptr(), p.0.as_ptr());
-        }
-        q
-    }
-}
