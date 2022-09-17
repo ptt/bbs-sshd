@@ -18,7 +18,7 @@
 use crate::kex::ComputeKeys;
 use crate::Error;
 use byteorder::{BigEndian, ByteOrder};
-use sodium::chacha20::*;
+use chacha20::*;
 
 pub struct OpeningKey {
     k1: Key,
@@ -87,12 +87,11 @@ impl super::OpeningKey for OpeningKey {
     ) -> Result<&'a [u8], Error> {
         let nonce = make_counter(sequence_number);
         {
-            use sodium::poly1305::*;
-            let mut poly_key = Key([0; 32]);
+            let mut poly_key = poly1305::Key([0; 32]);
             chacha20_xor(&mut poly_key.0, &nonce, &self.k2);
             // let mut tag_ = Tag([0; 16]);
             // tag_.0.clone_from_slice(tag);
-            if !poly1305_verify(&tag, ciphertext_in_plaintext_out, &poly_key) {
+            if !poly1305::poly1305_verify(&tag, ciphertext_in_plaintext_out, &poly_key) {
                 return Err(Error::PacketAuth);
             }
         }
@@ -145,10 +144,53 @@ impl super::SealingKey for SealingKey {
             chacha20_xor_ic(b, &nonce, 1, &self.k2);
         }
         nonce.0[0] = 0;
-        use sodium::poly1305::*;
-        let mut poly_key = Key([0; 32]);
+        let mut poly_key = poly1305::Key([0; 32]);
         chacha20_xor(&mut poly_key.0, &nonce, &self.k2);
-        let tag = poly1305_auth(plaintext_in_ciphertext_out, &poly_key);
+        let tag = poly1305::poly1305_auth(plaintext_in_ciphertext_out, &poly_key);
         tag_out.clone_from_slice(&tag.0);
+    }
+}
+
+mod chacha20 {
+    use chacha::{ChaCha, KeyStream, SeekableKeyStream};
+
+    pub const NONCE_BYTES: usize = 8;
+    pub const KEY_BYTES: usize = 32;
+    const BLOCK_SIZE: u64 = 64;
+    pub struct Nonce(pub [u8; NONCE_BYTES]);
+    pub struct Key(pub [u8; KEY_BYTES]);
+
+    pub fn chacha20_xor(c: &mut [u8], n: &Nonce, k: &Key) {
+        ChaCha::new_chacha20(&k.0, &n.0).xor_read(c).unwrap();
+    }
+
+    pub fn chacha20_xor_ic(c: &mut [u8], n: &Nonce, ic: u64, k: &Key) {
+        let mut s = ChaCha::new_chacha20(&k.0, &n.0);
+        s.seek_to(ic * BLOCK_SIZE).unwrap();
+        s.xor_read(c).unwrap();
+    }
+}
+
+pub mod poly1305 {
+    use poly1305::Poly1305;
+    use subtle::ConstantTimeEq;
+    use universal_hash::KeyInit;
+
+    pub const KEY_BYTES: usize = 32;
+    pub const TAG_BYTES: usize = 16;
+    pub struct Key(pub [u8; KEY_BYTES]);
+    pub struct Tag(pub [u8; TAG_BYTES]);
+
+    pub fn poly1305_auth(m: &[u8], key: &Key) -> Tag {
+        Tag(Poly1305::new(&key.0.into()).compute_unpadded(m).into())
+    }
+
+    pub fn poly1305_verify(tag: &[u8], m: &[u8], key: &Key) -> bool {
+        tag.len() == TAG_BYTES
+            && Poly1305::new(&key.0.into())
+                .compute_unpadded(m)
+                .ct_eq(tag.into())
+                .unwrap_u8()
+                == 1
     }
 }
