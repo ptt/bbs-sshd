@@ -17,9 +17,6 @@
 //! #[derive(Clone)]
 //! struct X{}
 //! impl agent::server::Agent for X {
-//!     fn confirm(&self, _: std::sync::Arc<key::KeyPair>) -> Box<dyn Future<Output = bool> + Send + Unpin> {
-//!         Box::new(futures::future::ready(true))
-//!     }
 //! }
 //!
 //! const PKCS8_ENCRYPTED: &'static str = "-----BEGIN ENCRYPTED PRIVATE KEY-----\nMIIFLTBXBgkqhkiG9w0BBQ0wSjApBgkqhkiG9w0BBQwwHAQITo1O0b8YrS0CAggA\nMAwGCCqGSIb3DQIJBQAwHQYJYIZIAWUDBAEqBBBtLH4T1KOfo1GGr7salhR8BIIE\n0KN9ednYwcTGSX3hg7fROhTw7JAJ1D4IdT1fsoGeNu2BFuIgF3cthGHe6S5zceI2\nMpkfwvHbsOlDFWMUIAb/VY8/iYxhNmd5J6NStMYRC9NC0fVzOmrJqE1wITqxtORx\nIkzqkgFUbaaiFFQPepsh5CvQfAgGEWV329SsTOKIgyTj97RxfZIKA+TR5J5g2dJY\nj346SvHhSxJ4Jc0asccgMb0HGh9UUDzDSql0OIdbnZW5KzYJPOx+aDqnpbz7UzY/\nP8N0w/pEiGmkdkNyvGsdttcjFpOWlLnLDhtLx8dDwi/sbEYHtpMzsYC9jPn3hnds\nTcotqjoSZ31O6rJD4z18FOQb4iZs3MohwEdDd9XKblTfYKM62aQJWH6cVQcg+1C7\njX9l2wmyK26Tkkl5Qg/qSfzrCveke5muZgZkFwL0GCcgPJ8RixSB4GOdSMa/hAMU\nkvFAtoV2GluIgmSe1pG5cNMhurxM1dPPf4WnD+9hkFFSsMkTAuxDZIdDk3FA8zof\nYhv0ZTfvT6V+vgH3Hv7Tqcxomy5Qr3tj5vvAqqDU6k7fC4FvkxDh2mG5ovWvc4Nb\nXv8sed0LGpYitIOMldu6650LoZAqJVv5N4cAA2Edqldf7S2Iz1QnA/usXkQd4tLa\nZ80+sDNv9eCVkfaJ6kOVLk/ghLdXWJYRLenfQZtVUXrPkaPpNXgD0dlaTN8KuvML\nUw/UGa+4ybnPsdVflI0YkJKbxouhp4iB4S5ACAwqHVmsH5GRnujf10qLoS7RjDAl\no/wSHxdT9BECp7TT8ID65u2mlJvH13iJbktPczGXt07nBiBse6OxsClfBtHkRLzE\nQF6UMEXsJnIIMRfrZQnduC8FUOkfPOSXc8r9SeZ3GhfbV/DmWZvFPCpjzKYPsM5+\nN8Bw/iZ7NIH4xzNOgwdp5BzjH9hRtCt4sUKVVlWfEDtTnkHNOusQGKu7HkBF87YZ\nRN/Nd3gvHob668JOcGchcOzcsqsgzhGMD8+G9T9oZkFCYtwUXQU2XjMN0R4VtQgZ\nrAxWyQau9xXMGyDC67gQ5xSn+oqMK0HmoW8jh2LG/cUowHFAkUxdzGadnjGhMOI2\nzwNJPIjF93eDF/+zW5E1l0iGdiYyHkJbWSvcCuvTwma9FIDB45vOh5mSR+YjjSM5\nnq3THSWNi7Cxqz12Q1+i9pz92T2myYKBBtu1WDh+2KOn5DUkfEadY5SsIu/Rb7ub\n5FBihk2RN3y/iZk+36I69HgGg1OElYjps3D+A9AjVby10zxxLAz8U28YqJZm4wA/\nT0HLxBiVw+rsHmLP79KvsT2+b4Diqih+VTXouPWC/W+lELYKSlqnJCat77IxgM9e\nYIhzD47OgWl33GJ/R10+RDoDvY4koYE+V5NLglEhbwjloo9Ryv5ywBJNS7mfXMsK\n/uf+l2AscZTZ1mhtL38efTQCIRjyFHc3V31DI0UdETADi+/Omz+bXu0D5VvX+7c6\nb1iVZKpJw8KUjzeUV8yOZhvGu3LrQbhkTPVYL555iP1KN0Eya88ra+FUKMwLgjYr\nJkUx4iad4dTsGPodwEP/Y9oX/Qk3ZQr+REZ8lg6IBoKKqqrQeBJ9gkm1jfKE6Xkc\nCog3JMeTrb3LiPHgN6gU2P30MRp6L1j1J/MtlOAr5rux\n-----END ENCRYPTED PRIVATE KEY-----\n";
@@ -33,9 +30,10 @@
 //!    let agent_path_ = agent_path.clone();
 //!    // Starting a server
 //!    core.spawn(async move {
-//!        let mut listener = tokio::net::UnixListener::bind(&agent_path_)
+//!        let listener = tokio::net::UnixListener::bind(&agent_path_)
 //!            .unwrap();
-//!        thrussh_keys::agent::server::serve(listener.incoming(), X {}).await
+//!        let stream = tokio_stream::wrappers::UnixListenerStream::new(listener);
+//!        thrussh_keys::agent::server::serve(stream, X {}).await
 //!    });
 //!    let key = decode_secret_key(PKCS8_ENCRYPTED, Some(b"blabla")).unwrap();
 //!    let public = key.clone_public_key();
@@ -44,9 +42,9 @@
 //!        let mut client = agent::client::AgentClient::connect(stream);
 //!        client.add_identity(&key, &[agent::Constraint::KeyLifetime { seconds: 60 }]).await?;
 //!        client.request_identities().await?;
-//!        let buf = b"signed message";
-//!        let sig = client.sign_request(&public, buf).await?.unwrap();
-//!        assert!(public.verify_detached(buf, sig.as_ref()));
+//!        let buf = b"signed message".to_vec();
+//!        let sig = client.sign_request(&public, buf.clone().into()).await.1?;
+//!        println!("{:?}", sig);
 //!        Ok::<(), Error>(())
 //!    }).unwrap()
 //! }
@@ -152,7 +150,7 @@ const KEYTYPE_ECDSA_SHA2_NISTP384: &'static [u8] = b"ecdsa-sha2-nistp384";
 
 /// Load a public key from a file. Ed25519 and RSA keys are supported.
 ///
-/// ```
+/// ```no_run
 /// thrussh_keys::load_public_key("/home/pe/.ssh/id_ed25519.pub").unwrap();
 /// ```
 pub fn load_public_key<P: AsRef<Path>>(path: P) -> Result<key::PublicKey, Error> {
@@ -730,26 +728,6 @@ PCeBxYsjjIg5q1FwAAAAplY2RzYUB0ZXN0AQIDBAUG
     }
 
     #[test]
-    fn test_ecdsa_sha2_nistp521_sign_verify() {
-        env_logger::try_init().unwrap_or(());
-        let key = "-----BEGIN OPENSSH PRIVATE KEY-----
-b3BlbnNzaC1rZXktdjEAAAAABG5vbmUAAAAEbm9uZQAAAAAAAAABAAAArAAAABNlY2RzYS
-1zaGEyLW5pc3RwNTIxAAAACG5pc3RwNTIxAAAAhQQBuBviTf/tmSF3cLRpF1a6F1Gcq/19
-5YeQGfiD9Nw7bRqjSFYVvV1i5tjgOhmESwLpGoFQ0wHudj8FPwEjjqYMAowANXRtRE0cE6
-F/quoAjtvHGkGEFnw//8H8VYxk6Hkix+iY3w+V9EL3QcnJ0v6Acu1Bex4Mdy+QM7hOKzmG
-ALv/LoMAAAEIYLg60WC4OtEAAAATZWNkc2Etc2hhMi1uaXN0cDUyMQAAAAhuaXN0cDUyMQ
-AAAIUEAbgb4k3/7Zkhd3C0aRdWuhdRnKv9feWHkBn4g/TcO20ao0hWFb1dYubY4DoZhEsC
-6RqBUNMB7nY/BT8BI46mDAKMADV0bURNHBOhf6rqAI7bxxpBhBZ8P//B/FWMZOh5IsfomN
-8PlfRC90HJydL+gHLtQXseDHcvkDO4Tis5hgC7/y6DAAAAQgF9J14qBTjR9qZbh0BQrNdZ
-h0B9KSZKfh3uQQQEfsc5L9+LMZV1S3A+j0k44FXhfxoX752oUbRCJR5yKoUXHmCxLQAAAA
-plY2RzYUB0ZXN0
------END OPENSSH PRIVATE KEY-----
-";
-        let public = "AAAAE2VjZHNhLXNoYTItbmlzdHA1MjEAAAAIbmlzdHA1MjEAAACFBAG4G+JN/+2ZIXdwtGkXVroXUZyr/X3lh5AZ+IP03DttGqNIVhW9XWLm2OA6GYRLAukagVDTAe52PwU/ASOOpgwCjAA1dG1ETRwToX+q6gCO28caQYQWfD//wfxVjGToeSLH6JjfD5X0QvdBycnS/oBy7UF7Hgx3L5AzuE4rOYYAu/8ugw==";
-        ecdsa_sign_verify(key, public);
-    }
-
-    #[test]
     fn test_o01eg() {
         env_logger::try_init().unwrap_or(());
 
@@ -863,6 +841,15 @@ Cog3JMeTrb3LiPHgN6gU2P30MRp6L1j1J/MtlOAr5rux
         decode_secret_key(PKCS8_ENCRYPTED, Some(b"blabla")).unwrap();
     }
 
+    fn read_named_sig(buf: &[u8]) -> (&[u8], &[u8]) {
+        use crate::encoding::Reader;
+        let mut r = buf.reader(0);
+        let mut data = r.read_string().unwrap().reader(0);
+        let name = data.read_string().unwrap();
+        let sig = data.read_string().unwrap();
+        (name, sig)
+    }
+
     fn test_client_agent(key: key::KeyPair) {
         env_logger::try_init().unwrap_or(());
         use std::process::{Command, Stdio};
@@ -888,8 +875,10 @@ Cog3JMeTrb3LiPHgN6gU2P30MRp6L1j1J/MtlOAr5rux
             let len = buf.len();
             let (_, buf) = client.sign_request(&public, buf).await;
             let buf = buf?;
-            let (a, b) = buf.split_at(len);
-            assert!(public.verify_detached(a, b));
+            let (msg, b) = buf.split_at(len);
+            let (name, sig) = read_named_sig(b);
+            assert_eq!(public.name().as_bytes(), name);
+            assert!(public.verify_detached(msg, sig));
             Ok::<(), Error>(())
         })
         .unwrap();
@@ -959,8 +948,10 @@ Cog3JMeTrb3LiPHgN6gU2P30MRp6L1j1J/MtlOAr5rux
             let len = buf.len();
             let (_, buf) = client.sign_request(&public, buf).await;
             let buf = buf?;
-            let (a, b) = buf.split_at(len);
-            assert!(public.verify_detached(a, b));
+            let (msg, b) = buf.split_at(len);
+            let (name, sig) = read_named_sig(b);
+            assert_eq!(public.name().as_bytes(), name);
+            assert!(public.verify_detached(msg, sig));
             Ok::<(), Error>(())
         })
         .unwrap()

@@ -234,6 +234,8 @@ pub mod ecdh {
             let mut r = payload.reader(0);
             super::check_packet_type(r.read_byte()?, msg::KEX_ECDH_REPLY)?;
 
+            let _ = r.read_string()?; // server's public host key
+
             let mut server_pubkey = GroupElement([0; 32]);
             super::checked_clone(&mut server_pubkey.0, r.read_string()?)?;
             debug!("server_pubkey: {:?}", server_pubkey);

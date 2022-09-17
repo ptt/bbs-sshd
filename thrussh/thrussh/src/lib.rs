@@ -149,7 +149,7 @@
 //! `Session` is passed to the `Handler` when the client receives
 //! data.
 //!
-//! ```
+//! ```no_run
 //!extern crate thrussh;
 //!extern crate thrussh_keys;
 //!extern crate futures;
