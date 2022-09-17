@@ -1,19 +1,16 @@
-use {Error, ErrorKind, KEYTYPE_ED25519, KEYTYPE_RSA, rsa_key_from_components};
+use super::is_base64_char;
+use base64::{decode_config, MIME};
+use bcrypt_pbkdf;
+use cipher::{BlockDecryptMut, BlockEncryptMut, KeyIvInit};
+use hex::FromHex;
+use ring;
+use ring::signature;
 use std;
 use thrussh::encoding::Reader;
 use thrussh::key;
-use super::is_base64_char;
-use hex::FromHex;
-use base64::{decode_config, MIME};
-use ring::signature;
 use untrusted;
 use yasna;
-use ring;
-
-use openssl::symm::{encrypt, decrypt, Cipher, Mode, Crypter};
-use openssl::hash::{MessageDigest, Hasher};
-use bcrypt_pbkdf;
-
+use {rsa_key_from_components, Error, ErrorKind, KEYTYPE_ED25519, KEYTYPE_RSA};
 
 const PBES2: &'static [u64] = &[1, 2, 840, 113549, 1, 5, 13];
 const PBKDF2: &'static [u64] = &[1, 2, 840, 113549, 1, 5, 12];
@@ -53,19 +50,23 @@ fn decode_pkcs8(
             reader.read_sequence(|reader| {
                 let version = reader.next().read_u64()?;
                 debug!("version = {:?}", version);
-                reader.next().read_sequence(|reader| {
-                    oid = Some(reader.next().read_oid()?);
-                    Ok(())
-                }).unwrap_or(());
+                reader
+                    .next()
+                    .read_sequence(|reader| {
+                        oid = Some(reader.next().read_oid()?);
+                        Ok(())
+                    })
+                    .unwrap_or(());
                 Ok(())
             })
-        }).unwrap_or(());
+        })
+        .unwrap_or(());
 
         debug!("pkcs8 oid {:?}", oid);
         let oid = if let Some(oid) = oid {
             oid
         } else {
-            return Err(ErrorKind::CouldNotReadKey.into())
+            return Err(ErrorKind::CouldNotReadKey.into());
         };
         if oid.components().as_slice() == ED25519 {
             let components = signature::primitive::Ed25519KeyPairComponents::from_pkcs8(
@@ -74,9 +75,10 @@ fn decode_pkcs8(
             debug!("components!");
             let keypair = signature::Ed25519KeyPair::from_pkcs8(untrusted::Input::from(&secret))?;
             debug!("keypair!");
-            Ok((key::Algorithm::Ed25519(keypair),
-                super::KeyPairComponents::Ed25519(components)))
-
+            Ok((
+                key::Algorithm::Ed25519(keypair),
+                super::KeyPairComponents::Ed25519(components),
+            ))
         } else if oid.components().as_slice() == RSA {
             let components = signature::primitive::RSAKeyPairComponents::from_pkcs8(
                 untrusted::Input::from(&secret),
@@ -92,9 +94,9 @@ fn decode_pkcs8(
                         hash: key::SignatureHash::SHA2_512,
                     },
                 ),
-                super::KeyPairComponents::RSA(
-                    super::RSAKeyPairComponents::from_components(&components),
-                ),
+                super::KeyPairComponents::RSA(super::RSAKeyPairComponents::from_components(
+                    &components,
+                )),
             ))
         } else {
             Err(ErrorKind::CouldNotReadKey.into())
@@ -122,16 +124,14 @@ fn test_read_write_pkcs8() {
     }
 }
 
-
 use yasna::models::ObjectIdentifier;
-pub fn encode_pkcs8<R:ring::rand::SecureRandom>(
+pub fn encode_pkcs8<R: ring::rand::SecureRandom>(
     rand: &R,
     plaintext: &[u8],
     password: Option<&[u8]>,
-    rounds: u32
+    rounds: u32,
 ) -> Result<Vec<u8>, Error> {
     if let Some(pass) = password {
-
         let mut salt = [0; 64];
         rand.fill(&mut salt)?;
         let mut iv = [0; 16];
@@ -140,18 +140,17 @@ pub fn encode_pkcs8<R:ring::rand::SecureRandom>(
         ring::pbkdf2::derive(&ring::digest::SHA256, rounds, &salt, pass, &mut key[..]);
         debug!("key = {:?}", key);
 
-        let mut plaintext = plaintext.to_vec();
-        let padding_len = 32 - (plaintext.len() % 32);
-        plaintext.extend(std::iter::repeat(padding_len as u8).take(padding_len));
-
         debug!("plaintext {:?}", plaintext);
-        let ciphertext = encrypt(Cipher::aes_256_cbc(), &key, Some(&iv), &plaintext)?;
+        let ciphertext = cbc::Encryptor::<aes::Aes256>::new(&key.into(), &iv.into())
+            .encrypt_padded_vec_mut::<block_padding::Pkcs7>(plaintext);
 
         let v = yasna::construct_der(|writer| {
             writer.write_sequence(|writer| {
                 // Encryption parameters
                 writer.next().write_sequence(|writer| {
-                    writer.next().write_oid(&ObjectIdentifier::from_slice(PBES2));
+                    writer
+                        .next()
+                        .write_oid(&ObjectIdentifier::from_slice(PBES2));
                     asn1_write_pbes2(writer.next(), rounds as u64, &salt, &iv)
                 });
                 // Ciphertext
@@ -168,12 +167,16 @@ fn asn1_write_pbes2(writer: yasna::DERWriter, rounds: u64, salt: &[u8], iv: &[u8
     writer.write_sequence(|writer| {
         // 1. Key generation algorithm
         writer.next().write_sequence(|writer| {
-            writer.next().write_oid(&ObjectIdentifier::from_slice(PBKDF2));
+            writer
+                .next()
+                .write_oid(&ObjectIdentifier::from_slice(PBKDF2));
             asn1_write_pbkdf2(writer.next(), rounds, salt)
         });
         // 2. Encryption algorithm.
         writer.next().write_sequence(|writer| {
-            writer.next().write_oid(&ObjectIdentifier::from_slice(AES256CBC));
+            writer
+                .next()
+                .write_oid(&ObjectIdentifier::from_slice(AES256CBC));
             writer.next().write_bytes(iv)
         });
     })
@@ -184,7 +187,9 @@ fn asn1_write_pbkdf2(writer: yasna::DERWriter, rounds: u64, salt: &[u8]) {
         writer.next().write_bytes(salt);
         writer.next().write_u64(rounds);
         writer.next().write_sequence(|writer| {
-            writer.next().write_oid(&ObjectIdentifier::from_slice(HMAC_SHA256));
+            writer
+                .next()
+                .write_oid(&ObjectIdentifier::from_slice(HMAC_SHA256));
             writer.next().write_null()
         })
     })
@@ -252,18 +257,25 @@ impl Encryption {
     }
 
     fn decrypt(&self, key: &[u8], ciphertext: &[u8]) -> Result<Vec<u8>, Error> {
-        let (cipher, iv) = match *self {
-            Encryption::Aes128Cbc(ref iv) => (Cipher::aes_128_cbc(), iv),
-            Encryption::Aes256Cbc(ref iv) => (Cipher::aes_256_cbc(), iv),
-        };
-        let mut dec = decrypt(
-            cipher,
-            &key,
-            Some(&iv[..]),
-            ciphertext
-        )?;
-        pkcs_unpad(&mut dec);
-        Ok(dec)
+        self.decrypt_impl(key, ciphertext)
+            .ok_or(Error::CouldNotReadKey)
+    }
+
+    fn decrypt_impl(&self, key: &[u8], ciphertext: &[u8]) -> Option<Vec<u8>> {
+        match *self {
+            Encryption::Aes128Cbc(ref iv) => {
+                cbc::Decryptor::<aes::Aes128>::new_from_slices(key, iv)
+                    .ok()?
+                    .decrypt_padded_vec_mut::<block_padding::Pkcs7>(ciphertext)
+                    .ok()
+            }
+            Encryption::Aes256Cbc(ref iv) => {
+                cbc::Decryptor::<aes::Aes256>::new_from_slices(key, iv)
+                    .ok()?
+                    .decrypt_padded_vec_mut::<block_padding::Pkcs7>(ciphertext)
+                    .ok()
+            }
+        }
     }
 }
 
@@ -298,9 +310,7 @@ fn asn1_read_pbes2(
                 Ok(Err(ErrorKind::UnknownAlgorithm(oid).into()))
             }
         })?;
-        Ok(keygen.and_then(|keygen| {
-            algorithm.map(|algo| Algorithms::Pbes2(keygen, algo))
-        }))
+        Ok(keygen.and_then(|keygen| algorithm.map(|algo| Algorithms::Pbes2(keygen, algo))))
     })
 }
 
@@ -319,12 +329,10 @@ fn asn1_read_pbkdf2(
                 Ok(Err(ErrorKind::UnknownAlgorithm(oid).into()))
             }
         })?;
-        Ok(digest.map(|digest| {
-            KeyDerivation::Pbkdf2 {
-                salt,
-                rounds,
-                digest,
-            }
+        Ok(digest.map(|digest| KeyDerivation::Pbkdf2 {
+            salt,
+            rounds,
+            digest,
         }))
     })
 }
@@ -336,5 +344,4 @@ fn asn1_read_aes256cbc(
     let mut i = [0; 16];
     i.clone_from_slice(&iv);
     Ok(Ok(Encryption::Aes256Cbc(i)))
-
 }
