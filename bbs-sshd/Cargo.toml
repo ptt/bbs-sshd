@@ -12,17 +12,17 @@ futures = "0.3.30"
 russh = { workspace = true }
 russh-keys = { workspace = true }
 tokio = { version = "1.37.0", features = ["signal", "time"] }
-libc = "0.2.153"
-socket2 = { version = "0.5.6", features = ["all"] }
+libc = "0.2.154"
+socket2 = { version = "0.5.7", features = ["all"] }
 log = { version = "0.4.21", features = ["serde", "release_max_level_trace"] }
 ssh-keys = "0.1.4"
-syslog = "6.1.0"
+syslog = "6.1.1"
 fork = "0.1.23"
 nix = "0.24.1"
 clap = { version = "3.1.18", features = ["cargo"] }
 toml = "0.8.12"
-serde = "1.0.197"
-serde_derive = "1.0.197"
+serde = "1.0.200"
+serde_derive = "1.0.200"
 proctitle = "0.1.1"
 time = "0.3.36"
 rlimit = "0.10.1"
