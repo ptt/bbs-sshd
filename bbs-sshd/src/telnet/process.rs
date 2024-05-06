@@ -85,12 +85,12 @@ impl Processor {
         }
     }
 
-    pub async fn process<H: Handler>(
+    pub async fn process<H: Handler + Send>(
         &mut self,
         data: &[u8],
-        mut handler: H,
-        mut remote: Remote,
-    ) -> Result<(H, Remote)> {
+        handler: &mut H,
+        remote: &Remote,
+    ) -> Result<()> {
         if data.len() == 0 {
             trace!("process: eof");
             if self.state != State::Normal {
@@ -112,34 +112,25 @@ impl Processor {
             match event {
                 ProcEvent::Queue => self.queued.queue(),
                 ProcEvent::Flush => {
-                    let (handler_, remote_) =
-                        handler.data(remote, &data[self.queued.flush()]).await?;
-                    handler = handler_;
-                    remote = remote_;
+                    handler.data(remote, &data[self.queued.flush()]).await?;
                 }
                 ProcEvent::Processed => self.queued.skip(),
                 ProcEvent::Command(cmd, opt) => {
                     self.queued.skip();
-                    let (handler_, remote_) = handler.command(remote, cmd, opt).await?;
-                    handler = handler_;
-                    remote = remote_;
+                    handler.command(remote, cmd, opt).await?;
                 }
                 ProcEvent::Subnegotiation(data) => {
                     self.queued.skip();
-                    let (handler_, remote_) = handler.subnegotiation(remote, &data).await?;
-                    handler = handler_;
-                    remote = remote_;
+                    handler.subnegotiation(remote, &data).await?;
                 }
                 ProcEvent::Error => return Err(io::Error::from(io::ErrorKind::ConnectionReset)),
             }
         }
         let rest = self.queued.flush();
         if !rest.is_empty() {
-            let (handler_, remote_) = handler.data(remote, &data[rest]).await?;
-            handler = handler_;
-            remote = remote_;
+            handler.data(remote, &data[rest]).await?;
         }
-        Ok((handler, remote))
+        Ok(())
     }
 
     fn normal(&mut self, b: u8) -> ProcEvent {

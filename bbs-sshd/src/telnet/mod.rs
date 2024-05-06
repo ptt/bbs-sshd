@@ -1,7 +1,7 @@
 pub mod byte;
 mod process;
+use async_trait::async_trait;
 use byte::{IAC, SB, SE};
-use futures::Future;
 use log::{debug, trace};
 use process::Processor;
 use std::io;
@@ -10,29 +10,26 @@ use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::sync::mpsc;
 use tokio::sync::mpsc::{Receiver, Sender};
 
+#[async_trait]
 pub trait Handler: Sized {
-    type FutureUnit: Future<Output = Result<(Self, Remote)>> + Send;
-
-    fn unit(self, remote: Remote) -> Self::FutureUnit;
-
     #[allow(unused_variables)]
-    fn data(self, remote: Remote, data: &[u8]) -> Self::FutureUnit {
-        self.unit(remote)
+    async fn data(&mut self, remote: &Remote, data: &[u8]) -> Result<()> {
+        Ok(())
     }
 
     #[allow(unused_variables)]
-    fn command(self, remote: Remote, cmd: u8, opt: Option<u8>) -> Self::FutureUnit {
-        self.unit(remote)
+    async fn command(&mut self, remote: &Remote, cmd: u8, opt: Option<u8>) -> Result<()> {
+        Ok(())
     }
 
     #[allow(unused_variables)]
-    fn subnegotiation(self, remote: Remote, data: &[u8]) -> Self::FutureUnit {
-        self.unit(remote)
+    async fn subnegotiation(&mut self, remote: &Remote, data: &[u8]) -> Result<()> {
+        Ok(())
     }
 
     #[allow(unused_variables)]
-    fn eof(self, remote: Remote) -> Self::FutureUnit {
-        self.unit(remote)
+    async fn eof(&mut self, remote: &Remote) -> Result<()> {
+        Ok(())
     }
 }
 
@@ -113,17 +110,16 @@ async fn send_subnegotiate<S: AsyncWrite + Unpin>(
 
 pub(crate) struct Telnet {
     buf_size: usize,
-    _remote: Remote,
+    remote: Remote,
     receiver: Option<Receiver<Action>>,
 }
 
 impl Telnet {
     pub fn new(buf_size: usize) -> Self {
         let (sender, receiver) = mpsc::channel(8);
-        let remote = Remote { sender };
         Telnet {
             buf_size,
-            _remote: remote,
+            remote: Remote { sender },
             receiver: Some(receiver),
         }
     }
@@ -143,22 +139,22 @@ impl Telnet {
             self.buf_size,
             Processor::new(),
             handler,
-            self._remote.clone(),
+            self.remote.clone(),
         ));
         tokio::spawn(run_writer(write_half, self.receiver.take().unwrap()));
     }
 
     pub fn remote(&self) -> &Remote {
-        &self._remote
+        &self.remote
     }
 }
 
-async fn run_processor<R: AsyncRead + Unpin, H: Handler>(
+async fn run_processor<R: AsyncRead + Unpin, H: Handler + Send>(
     mut read_half: R,
     buf_size: usize,
     mut processor: Processor,
     mut handler: H,
-    mut remote: Remote,
+    remote: Remote,
 ) -> Result<()> {
     let mut buf = Vec::new();
     buf.resize(buf_size, 0);
@@ -166,9 +162,7 @@ async fn run_processor<R: AsyncRead + Unpin, H: Handler>(
     loop {
         match read_half.read(&mut buf).await {
             Ok(n) => {
-                let (handler_, remote_) = processor.process(&buf[..n], handler, remote).await?;
-                handler = handler_;
-                remote = remote_;
+                processor.process(&buf[..n], &mut handler, &remote).await?;
                 if n == 0 {
                     break;
                 }

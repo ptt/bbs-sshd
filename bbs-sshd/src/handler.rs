@@ -1,18 +1,15 @@
 use crate::logind;
 use crate::telnet;
 use async_trait::async_trait;
-use futures::FutureExt;
 use log::{debug, info, trace, warn};
 use russh::server;
 use russh::server::{Auth, Handle, Msg, Session};
 use russh::{Channel, ChannelId, CryptoVec};
 use std::borrow::Cow;
 use std::cmp;
-use std::future;
 use std::io;
 use std::net::SocketAddr;
 use std::path::PathBuf;
-use std::pin::Pin;
 use std::sync::Arc;
 use tokio::net::UnixStream;
 use tokio::sync::mpsc;
@@ -38,38 +35,33 @@ impl TelnetHandler {
         TelnetHandler { tx }
     }
 
-    async fn send_data(
-        self,
-        remote: telnet::Remote,
-        data: CryptoVec,
-    ) -> io::Result<(Self, telnet::Remote)> {
+    async fn send_data(&mut self, _remote: &telnet::Remote, data: CryptoVec) -> io::Result<()> {
         match self.tx.send(data).await {
-            Ok(_) => Ok((self, remote)),
-            Err(_) => Err(io::Error::from(io::ErrorKind::ConnectionReset)),
+            Ok(_) => Ok(()),
+            Err(_) => Err(io::ErrorKind::ConnectionReset.into()),
         }
     }
 }
 
+#[async_trait]
 impl telnet::Handler for TelnetHandler {
-    type FutureUnit =
-        Pin<Box<dyn future::Future<Output = io::Result<(Self, telnet::Remote)>> + Send>>;
-
-    fn unit(self, remote: telnet::Remote) -> Self::FutureUnit {
-        future::ready(Ok((self, remote))).boxed()
-    }
-
-    fn command(self, remote: telnet::Remote, cmd: u8, opt: Option<u8>) -> Self::FutureUnit {
+    async fn command(
+        &mut self,
+        _remote: &telnet::Remote,
+        cmd: u8,
+        opt: Option<u8>,
+    ) -> io::Result<()> {
         trace!("telnet command {} opt {:?}", cmd, opt);
-        self.unit(remote)
+        Ok(())
     }
 
-    fn subnegotiation(self, remote: telnet::Remote, data: &[u8]) -> Self::FutureUnit {
+    async fn subnegotiation(&mut self, _remote: &telnet::Remote, data: &[u8]) -> io::Result<()> {
         trace!("telnet subnegotiation data {:?}", data);
-        self.unit(remote)
+        Ok(())
     }
 
-    fn data(self, remote: telnet::Remote, data: &[u8]) -> Self::FutureUnit {
-        self.send_data(remote, CryptoVec::from_slice(data)).boxed()
+    async fn data(&mut self, remote: &telnet::Remote, data: &[u8]) -> io::Result<()> {
+        self.send_data(remote, CryptoVec::from_slice(data)).await
     }
 }
 
