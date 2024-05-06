@@ -4,13 +4,13 @@ mod logind;
 mod socket_linux;
 mod telnet;
 use log::{error, info};
+use russh_keys::key::KeyPair;
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::str::FromStr;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use syslog::{Facility, Formatter3164, LoggerBackend};
-use thrussh_keys::key::KeyPair;
 use tokio::signal::unix::{signal, SignalKind};
 use tokio::sync::mpsc;
 
@@ -98,11 +98,11 @@ fn drop_privileges(cfg: &config::Config) {
 fn load_host_keys(
     cfg: &config::Config,
     keys: &mut Vec<KeyPair>,
-    key_algos: &mut Vec<thrussh_keys::key::Name>,
+    key_algos: &mut Vec<russh_keys::key::Name>,
 ) {
     for path in &cfg.host_keys {
-        let key = thrussh_keys::load_secret_key(path, None).expect("failed to load key");
-        use thrussh_keys::key::*;
+        let key = russh_keys::load_secret_key(path, None).expect("failed to load key");
+        use russh_keys::key::*;
         match key {
             KeyPair::RSA { key, .. } => {
                 keys.push(KeyPair::RSA {
@@ -127,20 +127,20 @@ fn load_host_keys(
                 keys.push(KeyPair::Ed25519(key));
                 key_algos.push(ED25519);
             }
-            KeyPair::Ec { key } => {
-                let key = KeyPair::Ec { key };
-                key_algos.push(thrussh_keys::key::Name(key.name()));
+            KeyPair::EC { key } => {
+                let key = KeyPair::EC { key };
+                key_algos.push(russh_keys::key::Name(key.name()));
                 keys.push(key);
             }
         }
     }
 }
 
-fn make_ssh_config(cfg: &config::Config) -> thrussh::server::Config {
-    let mut sshcfg = thrussh::server::Config::default();
-    sshcfg.server_id = "SSH-2.0-bbs-sshd".to_string();
+fn make_ssh_config(cfg: &config::Config) -> russh::server::Config {
+    let mut sshcfg = russh::server::Config::default();
+    sshcfg.server_id = russh::SshId::Standard("SSH-2.0-bbs-sshd".to_string());
     sshcfg.auth_rejection_time = Duration::ZERO;
-    sshcfg.connection_timeout = None;
+    sshcfg.inactivity_timeout = None;
 
     let mut key_algos = Vec::new();
     load_host_keys(cfg, &mut sshcfg.keys, &mut key_algos);
@@ -149,9 +149,9 @@ fn make_ssh_config(cfg: &config::Config) -> thrussh::server::Config {
 
     // Per RFC 4252 Sec. 7, "publickey" method is required. However, we are not going to accept it.
     // "keyboard-interactive" is used for printing out error messages about bad user names.
-    sshcfg.methods = thrussh::MethodSet::PUBLICKEY
-        | thrussh::MethodSet::KEYBOARD_INTERACTIVE
-        | thrussh::MethodSet::PASSWORD;
+    sshcfg.methods = russh::MethodSet::PUBLICKEY
+        | russh::MethodSet::KEYBOARD_INTERACTIVE
+        | russh::MethodSet::PASSWORD;
     if false {
         // debug rekey
         sshcfg.limits.rekey_time_limit = Duration::from_secs(10);
@@ -256,7 +256,7 @@ fn main() {
 }
 
 async fn run(
-    config: thrussh::server::Config,
+    config: russh::server::Config,
     listeners: Vec<std::net::TcpListener>,
     logind_paths: Vec<Arc<PathBuf>>,
 ) {
@@ -287,7 +287,7 @@ async fn run(
 }
 
 async fn run_one_server(
-    config: Arc<thrussh::server::Config>,
+    config: Arc<russh::server::Config>,
     listener: std::net::TcpListener,
     mut logind_paths: PathPicker,
     alive: mpsc::Sender<()>,
@@ -325,7 +325,7 @@ async fn run_one_server(
 }
 
 fn spawn_forwarding(
-    config: Arc<thrussh::server::Config>,
+    config: Arc<russh::server::Config>,
     stream: tokio::net::TcpStream,
     handler: handler::Handler,
     alive: mpsc::Sender<()>,
@@ -335,7 +335,7 @@ fn spawn_forwarding(
 
     use futures::FutureExt;
     tokio::spawn(
-        thrussh::server::run_stream(config, stream, handler).map(move |_| {
+        russh::server::run_stream(config, stream, handler).map(move |_| {
             let _ = alive;
         }),
     );

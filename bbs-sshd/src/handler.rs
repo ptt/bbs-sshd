@@ -1,7 +1,11 @@
 use crate::logind;
 use crate::telnet;
+use async_trait::async_trait;
 use futures::FutureExt;
 use log::{debug, info, trace, warn};
+use russh::server;
+use russh::server::{Auth, Handle, Msg, Session};
+use russh::{Channel, ChannelId, CryptoVec};
 use std::borrow::Cow;
 use std::cmp;
 use std::future;
@@ -10,9 +14,6 @@ use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::pin::Pin;
 use std::sync::Arc;
-use thrussh::server;
-use thrussh::server::{Auth, Handle, Session};
-use thrussh::{ChannelId, CryptoVec};
 use tokio::net::UnixStream;
 use tokio::sync::mpsc;
 
@@ -74,7 +75,7 @@ impl telnet::Handler for TelnetHandler {
 
 async fn ssh_writer(
     mut rx: mpsc::Receiver<CryptoVec>,
-    mut ssh: Handle,
+    ssh: Handle,
     channel: ChannelId,
 ) -> io::Result<()> {
     while let Some(data) = rx.recv().await {
@@ -136,16 +137,16 @@ impl Handler {
     }
 
     async fn start_conn(
-        mut self,
-        session: Session,
+        &mut self,
+        session: &mut Session,
         channel: ChannelId,
-    ) -> Result<(Self, Session), thrussh::Error> {
+    ) -> Result<(), russh::Error> {
         if self.telnet.is_some() {
             warn!(
                 "[client {}] Ignored client request to start another connection",
                 self.addr
             );
-            return Ok((self, session));
+            return Ok(());
         }
         info!("[client {}] Opened a connection to logind", self.addr);
 
@@ -176,11 +177,11 @@ impl Handler {
     }
 
     async fn send_window_size(
-        mut self,
-        session: Session,
+        &mut self,
+        _session: &mut Session,
         cols: u32,
         rows: u32,
-    ) -> Result<(Self, Session), thrussh::Error> {
+    ) -> Result<(), russh::Error> {
         let cols = cmp::min(cmp::max(cols, u16::MIN as u32), u16::MAX as u32) as u16;
         let rows = cmp::min(cmp::max(rows, u16::MIN as u32), u16::MAX as u32) as u16;
         self.window_size = WindowSize { cols, rows };
@@ -196,27 +197,27 @@ impl Handler {
         } else {
             debug!("Recorded new window size: {:?}", self.window_size);
         }
-        Ok((self, session))
+        Ok(())
     }
 
     async fn send_data(
-        self,
-        session: Session,
+        &mut self,
+        _session: &mut Session,
         remote: telnet::Remote,
         data: Vec<u8>,
-    ) -> Result<(Self, Session), thrussh::Error> {
+    ) -> Result<(), russh::Error> {
         match remote.data(data).await {
-            Ok(_) => Ok((self, session)),
+            Ok(_) => Ok(()),
             Err(e) => Err(e.into()),
         }
     }
 
-    async fn client_eof(self, session: Session) -> Result<(Self, Session), thrussh::Error> {
+    async fn client_eof(&mut self, _session: &mut Session) -> Result<(), russh::Error> {
         debug!("[client {}] client eof", self.addr);
         if let Some(telnet) = &self.telnet {
             telnet.remote().shutdown_write().await?;
         }
-        Ok((self, session))
+        Ok(())
     }
 
     async fn upstream_shutdown_write(remote: telnet::Remote) -> io::Result<()> {
@@ -227,102 +228,87 @@ impl Handler {
         self.channel == Some(channel)
     }
 
-    fn wrong_channel() -> <Self as server::Handler>::FutureUnit {
-        future::ready(Err(thrussh::Error::WrongChannel)).boxed()
+    fn wrong_channel() -> Result<(), russh::Error> {
+        Err(russh::Error::WrongChannel)
     }
 
-    fn auth_reject(mut self) -> <Self as server::Handler>::FutureAuth {
+    fn auth_reject(&mut self) -> Result<Auth, russh::Error> {
         self.auth_attempts += 1;
         if self.auth_attempts < 5 {
-            future::ready(Ok((self, Auth::Reject)))
+            Ok(Auth::Reject {
+                proceed_with_methods: Some(
+                    russh::MethodSet::PUBLICKEY
+                        | russh::MethodSet::KEYBOARD_INTERACTIVE
+                        | russh::MethodSet::PASSWORD,
+                ),
+            })
         } else {
-            future::ready(Err(thrussh::Error::Disconnect))
+            Err(russh::Error::Disconnect)
         }
     }
 }
 
+#[async_trait]
 impl server::Handler for Handler {
-    type Error = thrussh::Error;
-    type FutureAuth = future::Ready<Result<(Self, Auth), Self::Error>>;
-    type FutureBool = future::Ready<Result<(Self, Session, bool), Self::Error>>;
-    type FutureUnit =
-        Pin<Box<dyn future::Future<Output = Result<(Self, Session), Self::Error>> + Send>>;
+    type Error = russh::Error;
 
-    fn finished_auth(self, auth: Auth) -> Self::FutureAuth {
-        future::ready(Ok((self, auth)))
-    }
-
-    fn finished_bool(self, b: bool, session: Session) -> Self::FutureBool {
-        future::ready(Ok((self, session, b)))
-    }
-
-    fn finished(self, session: Session) -> Self::FutureUnit {
-        future::ready(Ok((self, session))).boxed()
-    }
-
-    fn auth_none(mut self, user: &str) -> Self::FutureAuth {
+    async fn auth_none(&mut self, user: &str) -> Result<Auth, Self::Error> {
         debug!("[client {}] auth_none: {}", self.addr, user);
         match user {
             "bbs" => self.encoding = logind::ConnData::CONV_NORMAL,
             "bbsu" => self.encoding = logind::ConnData::CONV_UTF8,
             _ => return self.auth_reject(),
         }
-        future::ready(Ok((self, Auth::Accept)))
+        Ok(Auth::Accept)
     }
 
-    fn auth_password(mut self, user: &str, _password: &str) -> Self::FutureAuth {
+    async fn auth_password(&mut self, user: &str, _password: &str) -> Result<Auth, Self::Error> {
         debug!("[client {}] auth_password: {}", self.addr, user);
         match user {
             "bbs" => self.encoding = logind::ConnData::CONV_NORMAL,
             "bbsu" => self.encoding = logind::ConnData::CONV_UTF8,
             _ => return self.auth_reject(),
         }
-        future::ready(Ok((self, Auth::Accept)))
+        Ok(Auth::Accept)
     }
 
-    fn auth_keyboard_interactive(
-        self,
+    async fn auth_keyboard_interactive(
+        &mut self,
         user: &str,
         submethods: &str,
-        response: Option<thrussh::server::Response<'_>>,
-    ) -> Self::FutureAuth {
+        response: Option<russh::server::Response<'async_trait>>,
+    ) -> Result<Auth, Self::Error> {
         // If we reach here, the user is neither "bbs" nor "bbsu".
         debug!(
             "[client {}] auth_keyboard_interactive: user {}, submethods {}, response {:?}",
             self.addr, user, submethods, response
         );
         if response.is_none() {
-            future::ready(Ok((
-                self,
-                Auth::Partial {
-                    name: Cow::from("(BBS SSH Only)"),
-                    instructions: Cow::from(
-                        "Please use user \"bbs\" for Big5 or \"bbsu\" for UTF-8.",
-                    ),
-                    prompts: Cow::from(vec![(
-                        Cow::from(format!("User {} is not recognized.\n", user)),
-                        true,
-                    )]),
-                },
-            )))
+            Ok(Auth::Partial {
+                name: Cow::from("(BBS SSH Only)"),
+                instructions: Cow::from("Please use user \"bbs\" for Big5 or \"bbsu\" for UTF-8."),
+                prompts: Cow::from(vec![(
+                    Cow::from(format!("User {} is not recognized.\n", user)),
+                    true,
+                )]),
+            })
         } else {
             info!("[client {}] Rejected auth: user {}", self.addr, user);
             self.auth_reject()
         }
     }
 
-    fn channel_open_session(
-        mut self,
-        channel: ChannelId,
-        mut session: Session,
-    ) -> Self::FutureUnit {
+    async fn channel_open_session(
+        &mut self,
+        channel: Channel<Msg>,
+        _session: &mut Session,
+    ) -> Result<bool, Self::Error> {
         if self.channel.is_some() {
             warn!(
                 "[client {}] channel_open_session: there is already an existing channel",
                 self.addr
             );
-            session.close(channel);
-            self.finished(session)
+            Ok(false)
         } else {
             debug!("[client {}] channel_open_session: opened", self.addr);
             info!(
@@ -330,22 +316,22 @@ impl server::Handler for Handler {
                 self.addr,
                 logind::encoding_name(self.encoding)
             );
-            self.channel = Some(channel);
-            self.finished(session)
+            self.channel = Some(channel.id());
+            Ok(true)
         }
     }
 
-    fn pty_request(
-        self,
+    async fn pty_request(
+        &mut self,
         channel: ChannelId,
         term: &str,
         col_width: u32,
         row_height: u32,
         pix_width: u32,
         pix_height: u32,
-        modes: &[(thrussh::Pty, u32)],
-        mut session: Session,
-    ) -> Self::FutureUnit {
+        modes: &[(russh::Pty, u32)],
+        session: &mut Session,
+    ) -> Result<(), Self::Error> {
         info!(
             "[client {}] pty_request: term {}, {} cols {} rows",
             self.addr, term, col_width, row_height,
@@ -359,26 +345,29 @@ impl server::Handler for Handler {
             return Self::wrong_channel();
         }
         session.channel_success(channel);
-        self.send_window_size(session, col_width, row_height)
-            .boxed()
+        self.send_window_size(session, col_width, row_height).await
     }
 
-    fn shell_request(self, channel: ChannelId, mut session: Session) -> Self::FutureUnit {
+    async fn shell_request(
+        &mut self,
+        channel: ChannelId,
+        session: &mut Session,
+    ) -> Result<(), Self::Error> {
         debug!("[client {}] shell_request", self.addr);
         if !self.check_channel(channel) {
             session.channel_failure(channel);
             return Self::wrong_channel();
         }
         session.channel_success(channel);
-        self.start_conn(session, channel).boxed()
+        self.start_conn(session, channel).await
     }
 
-    fn exec_request(
-        self,
+    async fn exec_request(
+        &mut self,
         channel: ChannelId,
         data: &[u8],
-        mut session: Session,
-    ) -> Self::FutureUnit {
+        session: &mut Session,
+    ) -> Result<(), Self::Error> {
         debug!(
             "[client {}] exec_request: data = {}",
             self.addr,
@@ -390,18 +379,18 @@ impl server::Handler for Handler {
         }
         warn!("[client {}] exec_request: Rejected", self.addr);
         session.close(channel);
-        self.finished(session)
+        Ok(())
     }
 
-    fn window_change_request(
-        self,
+    async fn window_change_request(
+        &mut self,
         channel: ChannelId,
         col_width: u32,
         row_height: u32,
         pix_width: u32,
         pix_height: u32,
-        mut session: Session,
-    ) -> Self::FutureUnit {
+        session: &mut Session,
+    ) -> Result<(), Self::Error> {
         debug!(
             "[client {}] window_change_request: {} cols {} rows, pix w {} h {}",
             self.addr, col_width, row_height, pix_width, pix_height
@@ -411,30 +400,42 @@ impl server::Handler for Handler {
             return Self::wrong_channel();
         }
         session.channel_success(channel);
-        self.send_window_size(session, col_width, row_height)
-            .boxed()
+        self.send_window_size(session, col_width, row_height).await
     }
 
-    fn data(self, channel: ChannelId, data: &[u8], session: Session) -> Self::FutureUnit {
+    async fn data(
+        &mut self,
+        channel: ChannelId,
+        data: &[u8],
+        session: &mut Session,
+    ) -> Result<(), Self::Error> {
         if !self.check_channel(channel) {
             return Self::wrong_channel();
         }
         if let Some(telnet) = &self.telnet {
             let remote = telnet.remote().clone();
-            self.send_data(session, remote, data.into()).boxed()
+            self.send_data(session, remote, data.into()).await
         } else {
-            self.finished(session)
+            Ok(())
         }
     }
 
-    fn channel_eof(self, channel: ChannelId, session: Session) -> Self::FutureUnit {
+    async fn channel_eof(
+        &mut self,
+        channel: ChannelId,
+        session: &mut Session,
+    ) -> Result<(), Self::Error> {
         if !self.check_channel(channel) {
             return Self::wrong_channel();
         }
-        self.client_eof(session).boxed()
+        self.client_eof(session).await
     }
 
-    fn channel_close(self, channel: ChannelId, session: Session) -> Self::FutureUnit {
-        self.channel_eof(channel, session)
+    async fn channel_close(
+        &mut self,
+        channel: ChannelId,
+        session: &mut Session,
+    ) -> Result<(), Self::Error> {
+        self.channel_eof(channel, session).await
     }
 }

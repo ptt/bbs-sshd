@@ -22,5 +22,4 @@ See `sample` directory for config file examples.
 
 ## License
 
-- [thrussh](https://pijul.org/thrussh): Apache License 2.0. See `thrussh/LICENSE-2.0.txt`.
-- Rest of the project: Apache License 2.0. See `LICENSE-2.0.txt`.
+- Apache License 2.0. See `LICENSE-2.0.txt`.

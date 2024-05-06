@@ -1,9 +1,11 @@
 [workspace]
 
-members = [ "bbs-sshd", "thrussh/thrussh-keys", "thrussh/thrussh", "thrussh/thrussh-config", "thrussh/cryptovec" ]
+resolver = "2"
 
-[patch.crates-io]
-thrussh = { path = "thrussh/thrussh" }
-thrussh-keys = { path = "thrussh/thrussh-keys" }
-cryptovec = { path = "thrussh/cryptovec" }
-thrussh-config = { path = "thrussh/thrussh-config" }
+members = [ "bbs-sshd" ]
+
+[workspace.dependencies]
+russh = { git = "https://github.com/warp-tech/russh", rev = "0fc65ea1d45257c0aef2044d333c634a35891402" }
+russh-keys = { git = "https://github.com/warp-tech/russh", rev = "0fc65ea1d45257c0aef2044d333c634a35891402" }
+russh-config = { git = "https://github.com/warp-tech/russh", rev = "0fc65ea1d45257c0aef2044d333c634a35891402" }
+russh-cryptovec = { git = "https://github.com/warp-tech/russh", rev = "0fc65ea1d45257c0aef2044d333c634a35891402" }
