@@ -3,6 +3,7 @@ mod handler;
 mod logind;
 mod socket_linux;
 mod telnet;
+use clap::Parser;
 use log::{error, info};
 use russh_keys::key::KeyPair;
 use std::net::SocketAddr;
@@ -13,9 +14,6 @@ use std::time::Duration;
 use syslog::{Facility, Formatter3164, LoggerBackend};
 use tokio::signal::unix::{signal, SignalKind};
 use tokio::sync::mpsc;
-
-const FLAG_NO_DEAMON: &str = "no_daemon";
-const FLAG_CONFIG_FILE: &str = "config_file";
 
 struct Logger {
     under: Mutex<syslog::Logger<LoggerBackend, Formatter3164>>,
@@ -176,35 +174,32 @@ fn bind_ports(cfg: &config::Config) -> Vec<std::net::TcpListener> {
         .collect()
 }
 
+#[derive(Parser, Debug)]
+#[command(
+    name = "BBS SSH Daemon",
+    version,
+    author,
+    about = "Specialized SSH daemon to bridge ssh client to logind.",
+    long_about = None,
+    after_help = "SIGNALS:\n\
+        \x20   SIGINT, SIGTERM - Graceful shutdown.\n\
+        \x20       Stop listening and wait all clients to disconnect",
+)]
+struct Args {
+    /// Config file path
+    #[arg(long, short = 'f')]
+    config_file: String,
+
+    /// Do not daemonize; PID file will not be written
+    #[arg(short = 'D', default_value_t = false)]
+    no_daemon: bool,
+}
+
 fn main() {
-    use clap::{Arg, Command};
-    let matches = Command::new("BBS SSH Daemon")
-        .version(clap::crate_version!())
-        .author(clap::crate_authors!())
-        .about("Specialized SSH daemon to bridge ssh client to logind.")
-        .arg(
-            Arg::new(FLAG_CONFIG_FILE)
-                .short('f')
-                .help("Config file path")
-                .takes_value(true)
-                .value_name("FILE")
-                .required(true),
-        )
-        .arg(
-            Arg::new(FLAG_NO_DEAMON)
-                .short('D')
-                .help("Do not daemonize; PID file will not be written"),
-        )
-        .after_help(
-            "SIGNALS:\n\
-            \x20   SIGINT, SIGTERM - Graceful shutdown.\n\
-            \x20       Stop listening and wait all clients to disconnect",
-        )
-        .get_matches();
+    let args = Args::parse();
 
     let cfg: config::Config = toml::from_str(
-        &std::fs::read_to_string(matches.value_of(FLAG_CONFIG_FILE).unwrap())
-            .expect("failed to read config file"),
+        &std::fs::read_to_string(args.config_file).expect("failed to read config file"),
     )
     .expect("failed to parse config file");
 
@@ -218,7 +213,7 @@ fn main() {
     let listeners = bind_ports(&cfg);
 
     drop_privileges(&cfg);
-    let foreground = matches.is_present(FLAG_NO_DEAMON);
+    let foreground = args.no_daemon;
     if !foreground {
         daemonize();
         write_pid_file(&cfg);

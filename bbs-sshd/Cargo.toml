@@ -18,8 +18,8 @@ log = { version = "0.4.21", features = ["serde", "release_max_level_trace"] }
 ssh-keys = "0.1.4"
 syslog = "6.1.1"
 fork = "0.1.23"
-nix = "0.24.1"
-clap = { version = "3.1.18", features = ["cargo"] }
+nix = { version = "0.28.0", features = ["user"] }
+clap = { version = "4.5.4", features = ["cargo", "derive"] }
 toml = "0.8.12"
 serde = "1.0.200"
 serde_derive = "1.0.200"
