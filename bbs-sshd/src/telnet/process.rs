@@ -91,7 +91,7 @@ impl Processor {
         handler: &mut H,
         remote: &Remote,
     ) -> Result<()> {
-        if data.len() == 0 {
+        if data.is_empty() {
             trace!("process: eof");
             if self.state != State::Normal {
                 return Err(io::Error::from(io::ErrorKind::ConnectionReset));
@@ -204,6 +204,6 @@ impl Processor {
         }
         trace!("telnet state: {:?} -> {:?}", self.state, state);
         self.state = state;
-        return true;
+        true
     }
 }

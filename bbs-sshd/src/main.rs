@@ -70,7 +70,7 @@ impl log::Log for Logger {
 fn daemonize() {
     // Closing fds is known to be problematic.
     match fork::daemon(/* nochdir */ false, /* noclose */ true) {
-        Ok(fork::Fork::Child) => return,
+        Ok(fork::Fork::Child) => (),
         Ok(fork::Fork::Parent(_)) => std::process::exit(0),
         Err(e) => {
             error!("Error daemonizing: {}", e);
@@ -137,10 +137,12 @@ fn load_host_keys(
 }
 
 fn make_ssh_config(cfg: &config::Config) -> russh::server::Config {
-    let mut sshcfg = russh::server::Config::default();
-    sshcfg.server_id = russh::SshId::Standard("SSH-2.0-bbs-sshd".to_string());
-    sshcfg.auth_rejection_time = Duration::ZERO;
-    sshcfg.inactivity_timeout = None;
+    let mut sshcfg = russh::server::Config {
+        server_id: russh::SshId::Standard("SSH-2.0-bbs-sshd".into()),
+        auth_rejection_time: Duration::ZERO,
+        inactivity_timeout: None,
+        ..Default::default()
+    };
 
     let mut key_algos = Vec::new();
     load_host_keys(cfg, &mut sshcfg.keys, &mut key_algos);

@@ -51,8 +51,8 @@ impl ConnData {
 
 pub fn encoding_name(encoding: u32) -> &'static str {
     match encoding {
-        ConnData::CONV_NORMAL => &"big5",
-        ConnData::CONV_UTF8 => &"utf8",
-        _ => &"unknown",
+        ConnData::CONV_NORMAL => "big5",
+        ConnData::CONV_UTF8 => "utf8",
+        _ => "unknown",
     }
 }

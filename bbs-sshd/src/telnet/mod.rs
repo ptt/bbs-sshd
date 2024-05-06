@@ -70,7 +70,7 @@ impl Remote {
     }
 }
 
-fn escape_iov<'a>(data: &'a [u8], skip_single: bool) -> Option<Vec<IoSlice<'a>>> {
+fn escape_iov(data: &[u8], skip_single: bool) -> Option<Vec<IoSlice<'_>>> {
     let mut iov: Option<Vec<IoSlice<'_>>> = None;
     let mut last = 0;
     for (i, &b) in data.iter().enumerate() {
@@ -91,7 +91,7 @@ async fn escape_send<S: AsyncWrite + Unpin>(stream: &mut S, data: &[u8]) -> Resu
     if let Some(iov) = escape_iov(data, true) {
         stream.write_vectored(&iov).await
     } else {
-        stream.write(&data).await
+        stream.write(data).await
     }
 }
 
@@ -156,9 +156,7 @@ async fn run_processor<R: AsyncRead + Unpin, H: Handler + Send>(
     mut handler: H,
     remote: Remote,
 ) -> Result<()> {
-    let mut buf = Vec::new();
-    buf.resize(buf_size, 0);
-
+    let mut buf = vec![0; buf_size];
     loop {
         match read_half.read(&mut buf).await {
             Ok(n) => {
