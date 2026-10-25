@@ -237,7 +237,7 @@ async fn run(
         join_set.spawn(run_one_server(
             config.clone(),
             listener,
-            PathPicker::new(logind_paths.clone(), idx),
+            RoundRobin::new(logind_paths.clone(), idx),
             tx.subscribe(),
         ));
     }
@@ -257,7 +257,7 @@ async fn run(
 async fn run_one_server(
     config: Arc<russh::server::Config>,
     listener: std::net::TcpListener,
-    mut logind_paths: PathPicker,
+    mut logind_paths: RoundRobin<Arc<PathBuf>>,
     mut stop: broadcast::Receiver<()>,
 ) {
     let listener = tokio::net::TcpListener::from_std(listener)
@@ -280,7 +280,7 @@ async fn run_one_server(
                 join_set.spawn(run_forwarding(
                     config.clone(),
                     stream,
-                    handler::Handler::new(client_addr, lport, logind_paths.next()),
+                    handler::Handler::new(client_addr, lport, logind_paths.next().clone()),
                 ));
             }
         }
@@ -302,23 +302,23 @@ async fn run_forwarding(
         .await
 }
 
-struct PathPicker {
-    paths: Vec<Arc<PathBuf>>,
+struct RoundRobin<T> {
+    items: Vec<T>,
     offset: usize,
 }
 
-impl PathPicker {
-    pub fn new(paths: Vec<Arc<PathBuf>>, offset: usize) -> Self {
-        let offset = offset % paths.len();
-        PathPicker { paths, offset }
+impl<T> RoundRobin<T> {
+    pub fn new(items: Vec<T>, offset: usize) -> Self {
+        let offset = offset % items.len();
+        Self { items, offset }
     }
 
-    pub fn next(&mut self) -> Arc<PathBuf> {
-        let path = self.paths[self.offset].clone();
+    pub fn next(&mut self) -> &T {
+        let item = &self.items[self.offset];
         self.offset += 1;
-        if self.offset == self.paths.len() {
+        if self.offset == self.items.len() {
             self.offset = 0;
         }
-        path
+        item
     }
 }
