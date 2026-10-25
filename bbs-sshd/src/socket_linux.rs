@@ -17,7 +17,7 @@ pub fn new_listener(addr: SocketAddr, backlog: i32) -> Result<std::net::TcpListe
 
 pub fn set_client_conn_options(stream: TcpStream) -> Result<TcpStream> {
     let sock = Socket::from(stream.into_std()?);
-    sock.set_nodelay(true)?;
+    sock.set_tcp_nodelay(true)?;
     sock.set_tcp_keepalive(&TcpKeepalive::new().with_time(Duration::from_secs(600)))?;
     TcpStream::from_std(sock.into())
 }

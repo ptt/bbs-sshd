@@ -5,7 +5,7 @@ mod socket_linux;
 mod telnet;
 use clap::Parser;
 use log::{error, info};
-use russh_keys::key::KeyPair;
+use std::borrow::Cow;
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::str::FromStr;
@@ -93,47 +93,6 @@ fn drop_privileges(cfg: &config::Config) {
     }
 }
 
-fn load_host_keys(
-    cfg: &config::Config,
-    keys: &mut Vec<KeyPair>,
-    key_algos: &mut Vec<russh_keys::key::Name>,
-) {
-    for path in &cfg.host_keys {
-        let key = russh_keys::load_secret_key(path, None).expect("failed to load key");
-        use russh_keys::key::*;
-        match key {
-            KeyPair::RSA { key, .. } => {
-                keys.push(KeyPair::RSA {
-                    key: key.clone(),
-                    hash: SignatureHash::SHA2_512,
-                });
-                key_algos.push(RSA_SHA2_512);
-
-                keys.push(KeyPair::RSA {
-                    key: key.clone(),
-                    hash: SignatureHash::SHA2_256,
-                });
-                key_algos.push(RSA_SHA2_256);
-
-                keys.push(KeyPair::RSA {
-                    key: key.clone(),
-                    hash: SignatureHash::SHA1,
-                });
-                key_algos.push(SSH_RSA);
-            }
-            KeyPair::Ed25519(key) => {
-                keys.push(KeyPair::Ed25519(key));
-                key_algos.push(ED25519);
-            }
-            KeyPair::EC { key } => {
-                let key = KeyPair::EC { key };
-                key_algos.push(russh_keys::key::Name(key.name()));
-                keys.push(key);
-            }
-        }
-    }
-}
-
 fn make_ssh_config(cfg: &config::Config) -> russh::server::Config {
     let mut sshcfg = russh::server::Config {
         server_id: russh::SshId::Standard("SSH-2.0-bbs-sshd".into()),
@@ -142,16 +101,24 @@ fn make_ssh_config(cfg: &config::Config) -> russh::server::Config {
         ..Default::default()
     };
 
-    let mut key_algos = Vec::new();
-    load_host_keys(cfg, &mut sshcfg.keys, &mut key_algos);
-    sshcfg.preferred.key = key_algos.leak();
-    sshcfg.preferred.compression = &["none"];
+    sshcfg.keys = cfg
+        .host_keys
+        .iter()
+        .map(|path| russh::keys::load_secret_key(path, None).expect("failed to load key"))
+        .collect();
+    sshcfg.preferred.key = sshcfg
+        .keys
+        .iter()
+        .map(|key| key.algorithm())
+        .collect::<Vec<_>>()
+        .into();
+    sshcfg.preferred.compression = Cow::from(&[russh::compression::NONE]);
 
     // Per RFC 4252 Sec. 7, "publickey" method is required. However, we are not going to accept it.
     // "keyboard-interactive" is used for printing out error messages about bad user names.
-    sshcfg.methods = russh::MethodSet::PUBLICKEY
-        | russh::MethodSet::KEYBOARD_INTERACTIVE
-        | russh::MethodSet::PASSWORD;
+    sshcfg.methods.push(russh::MethodKind::PublicKey);
+    sshcfg.methods.push(russh::MethodKind::KeyboardInteractive);
+    sshcfg.methods.push(russh::MethodKind::Password);
     if false {
         // debug rekey
         sshcfg.limits.rekey_time_limit = Duration::from_secs(10);

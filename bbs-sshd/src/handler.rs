@@ -1,10 +1,11 @@
 use crate::logind;
 use crate::telnet;
 use async_trait::async_trait;
+use bytes::Bytes;
 use log::{debug, info, trace, warn};
 use russh::server;
 use russh::server::{Auth, Handle, Msg, Session};
-use russh::{Channel, ChannelId, CryptoVec};
+use russh::{Channel, ChannelId};
 use std::borrow::Cow;
 use std::cmp;
 use std::io;
@@ -27,15 +28,15 @@ impl WindowSize {
 }
 
 struct TelnetHandler {
-    tx: mpsc::Sender<CryptoVec>,
+    tx: mpsc::Sender<Bytes>,
 }
 
 impl TelnetHandler {
-    fn new(tx: mpsc::Sender<CryptoVec>) -> Self {
+    fn new(tx: mpsc::Sender<Bytes>) -> Self {
         TelnetHandler { tx }
     }
 
-    async fn send_data(&mut self, _remote: &telnet::Remote, data: CryptoVec) -> io::Result<()> {
+    async fn send_data(&mut self, _remote: &telnet::Remote, data: Bytes) -> io::Result<()> {
         match self.tx.send(data).await {
             Ok(_) => Ok(()),
             Err(_) => Err(io::ErrorKind::ConnectionReset.into()),
@@ -61,12 +62,12 @@ impl telnet::Handler for TelnetHandler {
     }
 
     async fn data(&mut self, remote: &telnet::Remote, data: &[u8]) -> io::Result<()> {
-        self.send_data(remote, CryptoVec::from_slice(data)).await
+        self.send_data(remote, Bytes::copy_from_slice(data)).await
     }
 }
 
 async fn ssh_writer(
-    mut rx: mpsc::Receiver<CryptoVec>,
+    mut rx: mpsc::Receiver<Bytes>,
     ssh: Handle,
     channel: ChannelId,
 ) -> io::Result<()> {
@@ -227,12 +228,13 @@ impl Handler {
     fn auth_reject(&mut self) -> Result<Auth, russh::Error> {
         self.auth_attempts += 1;
         if self.auth_attempts < 5 {
+            let mut method_set = russh::MethodSet::empty();
+            method_set.push(russh::MethodKind::PublicKey);
+            method_set.push(russh::MethodKind::KeyboardInteractive);
+            method_set.push(russh::MethodKind::Password);
             Ok(Auth::Reject {
-                proceed_with_methods: Some(
-                    russh::MethodSet::PUBLICKEY
-                        | russh::MethodSet::KEYBOARD_INTERACTIVE
-                        | russh::MethodSet::PASSWORD,
-                ),
+                proceed_with_methods: Some(method_set),
+                partial_success: false,
             })
         } else {
             Err(russh::Error::Disconnect)
@@ -240,7 +242,6 @@ impl Handler {
     }
 }
 
-#[async_trait]
 impl server::Handler for Handler {
     type Error = russh::Error;
 
@@ -264,16 +265,16 @@ impl server::Handler for Handler {
         Ok(Auth::Accept)
     }
 
-    async fn auth_keyboard_interactive(
+    async fn auth_keyboard_interactive<'a>(
         &mut self,
         user: &str,
         submethods: &str,
-        response: Option<russh::server::Response<'async_trait>>,
+        response: Option<russh::server::Response<'a>>,
     ) -> Result<Auth, Self::Error> {
         // If we reach here, the user is neither "bbs" nor "bbsu".
         debug!(
-            "[client {}] auth_keyboard_interactive: user {}, submethods {}, response {:?}",
-            self.addr, user, submethods, response
+            "[client {}] auth_keyboard_interactive: user {}, submethods {}",
+            self.addr, user, submethods
         );
         if response.is_none() {
             Ok(Auth::Partial {
@@ -293,14 +294,18 @@ impl server::Handler for Handler {
     async fn channel_open_session(
         &mut self,
         channel: Channel<Msg>,
+        reply: russh::server::ChannelOpenHandle,
         _session: &mut Session,
-    ) -> Result<bool, Self::Error> {
+    ) -> Result<(), Self::Error> {
         if self.channel.is_some() {
             warn!(
                 "[client {}] channel_open_session: there is already an existing channel",
                 self.addr
             );
-            Ok(false)
+            reply
+                .reject(russh::ChannelOpenFailure::ResourceShortage)
+                .await;
+            Ok(())
         } else {
             debug!("[client {}] channel_open_session: opened", self.addr);
             info!(
@@ -309,7 +314,8 @@ impl server::Handler for Handler {
                 logind::encoding_name(self.encoding)
             );
             self.channel = Some(channel.id());
-            Ok(true)
+            reply.accept().await;
+            Ok(())
         }
     }
 
@@ -333,10 +339,10 @@ impl server::Handler for Handler {
             self.addr, pix_width, pix_height, modes
         );
         if !self.check_channel(channel) {
-            session.channel_failure(channel);
+            session.channel_failure(channel)?;
             return Self::wrong_channel();
         }
-        session.channel_success(channel);
+        session.channel_success(channel)?;
         self.send_window_size(session, col_width, row_height).await
     }
 
@@ -347,10 +353,10 @@ impl server::Handler for Handler {
     ) -> Result<(), Self::Error> {
         debug!("[client {}] shell_request", self.addr);
         if !self.check_channel(channel) {
-            session.channel_failure(channel);
+            session.channel_failure(channel)?;
             return Self::wrong_channel();
         }
-        session.channel_success(channel);
+        session.channel_success(channel)?;
         self.start_conn(session, channel).await
     }
 
@@ -365,12 +371,12 @@ impl server::Handler for Handler {
             self.addr,
             String::from_utf8_lossy(data)
         );
-        session.channel_failure(channel);
+        session.channel_failure(channel)?;
         if !self.check_channel(channel) {
             return Self::wrong_channel();
         }
         warn!("[client {}] exec_request: Rejected", self.addr);
-        session.close(channel);
+        session.close(channel)?;
         Ok(())
     }
 
@@ -388,10 +394,10 @@ impl server::Handler for Handler {
             self.addr, col_width, row_height, pix_width, pix_height
         );
         if !self.check_channel(channel) {
-            session.channel_failure(channel);
+            session.channel_failure(channel)?;
             return Self::wrong_channel();
         }
-        session.channel_success(channel);
+        session.channel_success(channel)?;
         self.send_window_size(session, col_width, row_height).await
     }
 
