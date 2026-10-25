@@ -265,6 +265,15 @@ impl server::Handler for Handler {
         Ok(Auth::Accept)
     }
 
+    async fn auth_publickey_offered(
+        &mut self,
+        user: &str,
+        _public_key: &russh::keys::PublicKey,
+    ) -> Result<Auth, Self::Error> {
+        debug!("[client {}] auth_publickey_offered: {}", self.addr, user);
+        self.auth_reject()
+    }
+
     async fn auth_keyboard_interactive<'a>(
         &mut self,
         user: &str,
