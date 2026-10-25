@@ -85,7 +85,7 @@ impl Processor {
         }
     }
 
-    pub async fn process<H: Handler + Send>(
+    pub async fn process<H: Handler>(
         &mut self,
         data: &[u8],
         handler: &mut H,

@@ -1,6 +1,5 @@
 use crate::logind;
 use crate::telnet;
-use async_trait::async_trait;
 use bytes::Bytes;
 use log::{debug, info, trace, warn};
 use russh::server;
@@ -44,7 +43,6 @@ impl TelnetHandler {
     }
 }
 
-#[async_trait]
 impl telnet::Handler for TelnetHandler {
     async fn command(
         &mut self,

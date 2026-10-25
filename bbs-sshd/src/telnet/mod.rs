@@ -1,6 +1,5 @@
 pub mod byte;
 mod process;
-use async_trait::async_trait;
 use byte::{IAC, SB, SE};
 use log::{debug, trace};
 use process::Processor;
@@ -10,26 +9,34 @@ use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::sync::mpsc;
 use tokio::sync::mpsc::{Receiver, Sender};
 
-#[async_trait]
 pub trait Handler: Sized {
     #[allow(unused_variables)]
-    async fn data(&mut self, remote: &Remote, data: &[u8]) -> Result<()> {
-        Ok(())
+    fn data(&mut self, remote: &Remote, data: &[u8]) -> impl Future<Output = Result<()>> + Send {
+        async { Ok(()) }
     }
 
     #[allow(unused_variables)]
-    async fn command(&mut self, remote: &Remote, cmd: u8, opt: Option<u8>) -> Result<()> {
-        Ok(())
+    fn command(
+        &mut self,
+        remote: &Remote,
+        cmd: u8,
+        opt: Option<u8>,
+    ) -> impl Future<Output = Result<()>> + Send {
+        async { Ok(()) }
     }
 
     #[allow(unused_variables)]
-    async fn subnegotiation(&mut self, remote: &Remote, data: &[u8]) -> Result<()> {
-        Ok(())
+    fn subnegotiation(
+        &mut self,
+        remote: &Remote,
+        data: &[u8],
+    ) -> impl Future<Output = Result<()>> + Send {
+        async { Ok(()) }
     }
 
     #[allow(unused_variables)]
-    async fn eof(&mut self, remote: &Remote) -> Result<()> {
-        Ok(())
+    fn eof(&mut self, remote: &Remote) -> impl Future<Output = Result<()>> + Send {
+        async { Ok(()) }
     }
 }
 
@@ -149,7 +156,7 @@ impl Telnet {
     }
 }
 
-async fn run_processor<R: AsyncRead + Unpin, H: Handler + Send>(
+async fn run_processor<R: AsyncRead + Unpin, H: Handler>(
     mut read_half: R,
     buf_size: usize,
     mut processor: Processor,

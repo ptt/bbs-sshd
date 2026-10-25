@@ -6,7 +6,6 @@ edition = "2024"
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
-async-trait = "0.1.92"
 bytes = "1.12.1"
 futures = "0.3.34"
 russh = "0.64.1"
