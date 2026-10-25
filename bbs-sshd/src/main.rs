@@ -13,7 +13,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use syslog::{Facility, Formatter3164, LoggerBackend};
 use tokio::signal::unix::{signal, SignalKind};
-use tokio::sync::mpsc;
+use tokio::sync::broadcast;
 
 struct Logger {
     under: Mutex<syslog::Logger<LoggerBackend, Formatter3164>>,
@@ -224,29 +224,33 @@ async fn run(
     listeners: Vec<std::net::TcpListener>,
     logind_paths: Vec<Arc<PathBuf>>,
 ) {
-    let (tx, mut rx) = mpsc::channel(1);
+    let (tx, _rx) = broadcast::channel(1);
     let config = Arc::new(config);
 
     proctitle::set_title("bbs-sshd: run");
-    let servers: Vec<_> = listeners
-        .into_iter()
-        .enumerate()
-        .map(move |(idx, listener)| {
-            tokio::spawn(run_one_server(
-                config.clone(),
-                listener,
-                PathPicker::new(logind_paths.clone(), idx),
-                tx.clone(),
-            ))
-        })
-        .collect();
 
-    for handle in servers.into_iter() {
-        let _ = handle.await;
+    let mut sigint = signal(SignalKind::interrupt()).unwrap();
+    let mut sigterm = signal(SignalKind::terminate()).unwrap();
+
+    let mut join_set = tokio::task::JoinSet::new();
+    for (idx, listener) in listeners.into_iter().enumerate() {
+        join_set.spawn(run_one_server(
+            config.clone(),
+            listener,
+            PathPicker::new(logind_paths.clone(), idx),
+            tx.subscribe(),
+        ));
+    }
+
+    tokio::select! {
+        _ = sigint.recv() => (),
+        _ = sigterm.recv() => (),
     }
     info!("Signal caught, draining clients");
     proctitle::set_title("bbs-sshd: drain");
-    let _ = rx.recv().await;
+    drop(tx);
+
+    while join_set.join_next().await.is_some() {}
     info!("bbs-sshd stopped");
 }
 
@@ -254,9 +258,8 @@ async fn run_one_server(
     config: Arc<russh::server::Config>,
     listener: std::net::TcpListener,
     mut logind_paths: PathPicker,
-    alive: mpsc::Sender<()>,
+    mut stop: broadcast::Receiver<()>,
 ) {
-    let _ = alive;
     let listener = tokio::net::TcpListener::from_std(listener)
         .expect("unable to convert TcpListener into tokio");
     let lport = match listener
@@ -267,42 +270,36 @@ async fn run_one_server(
         SocketAddr::V6(v6) => v6.port(),
     };
 
-    let mut sigint = signal(SignalKind::interrupt()).unwrap();
-    let mut sigterm = signal(SignalKind::terminate()).unwrap();
-
+    let mut join_set = tokio::task::JoinSet::new();
     loop {
         tokio::select! {
             biased;
-            _ = sigint.recv() => break,
-            _ = sigterm.recv() => break,
+            _ = stop.recv() => break,
             accepted = listener.accept() => {
                 let (stream, client_addr) = accepted.expect("unable to accept connection");
-                spawn_forwarding(
+                join_set.spawn(run_forwarding(
                     config.clone(),
                     stream,
                     handler::Handler::new(client_addr, lport, logind_paths.next()),
-                    alive.clone(),
-                );
+                ));
             }
         }
     }
+    drop(listener);
+    while join_set.join_next().await.is_some() {}
 }
 
-fn spawn_forwarding(
+async fn run_forwarding(
     config: Arc<russh::server::Config>,
     stream: tokio::net::TcpStream,
     handler: handler::Handler,
-    alive: mpsc::Sender<()>,
-) {
+) -> Result<(), <handler::Handler as russh::server::Handler>::Error> {
     let stream =
         socket_linux::set_client_conn_options(stream).expect("unable to set socket options");
 
-    use futures::FutureExt;
-    tokio::spawn(
-        russh::server::run_stream(config, stream, handler).map(move |_| {
-            let _ = alive;
-        }),
-    );
+    russh::server::run_stream(config, stream, handler)
+        .await?
+        .await
 }
 
 struct PathPicker {
