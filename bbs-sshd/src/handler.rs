@@ -231,12 +231,29 @@ impl Handler {
         remote.shutdown_write().await
     }
 
-    fn check_channel(&self, channel: ChannelId) -> bool {
-        self.channel == Some(channel)
+    /// Returns `russh::Error::WrongChannel` unless `channel` is the one channel
+    /// this handler serves.
+    fn check_channel(&self, channel: ChannelId) -> Result<(), russh::Error> {
+        if self.channel == Some(channel) {
+            Ok(())
+        } else {
+            Err(russh::Error::WrongChannel)
+        }
     }
 
-    fn wrong_channel() -> Result<(), russh::Error> {
-        Err(russh::Error::WrongChannel)
+    /// `check_channel` plus the `channel_success` / `channel_failure` reply
+    /// expected for a channel request.
+    fn check_channel_request(
+        &mut self,
+        session: &mut Session,
+        channel: ChannelId,
+    ) -> Result<(), russh::Error> {
+        if self.check_channel(channel).is_err() {
+            session.channel_failure(channel)?;
+            return Err(russh::Error::WrongChannel);
+        }
+        session.channel_success(channel)?;
+        Ok(())
     }
 
     fn auth_reject(&mut self) -> Result<Auth, russh::Error> {
@@ -362,11 +379,7 @@ impl server::Handler for Handler {
             "[client {}] pty_request: pix w {} h {}, modes: {:?}",
             self.addr, pix_width, pix_height, modes
         );
-        if !self.check_channel(channel) {
-            session.channel_failure(channel)?;
-            return Self::wrong_channel();
-        }
-        session.channel_success(channel)?;
+        self.check_channel_request(session, channel)?;
         self.send_window_size(session, col_width, row_height).await
     }
 
@@ -376,11 +389,7 @@ impl server::Handler for Handler {
         session: &mut Session,
     ) -> Result<(), Self::Error> {
         debug!("[client {}] shell_request", self.addr);
-        if !self.check_channel(channel) {
-            session.channel_failure(channel)?;
-            return Self::wrong_channel();
-        }
-        session.channel_success(channel)?;
+        self.check_channel_request(session, channel)?;
         self.start_conn(session, channel).await
     }
 
@@ -395,10 +404,9 @@ impl server::Handler for Handler {
             self.addr,
             String::from_utf8_lossy(data)
         );
+        // exec is always rejected, so reply failure before checking the channel.
         session.channel_failure(channel)?;
-        if !self.check_channel(channel) {
-            return Self::wrong_channel();
-        }
+        self.check_channel(channel)?;
         warn!("[client {}] exec_request: Rejected", self.addr);
         session.close(channel)?;
         Ok(())
@@ -417,11 +425,7 @@ impl server::Handler for Handler {
             "[client {}] window_change_request: {} cols {} rows, pix w {} h {}",
             self.addr, col_width, row_height, pix_width, pix_height
         );
-        if !self.check_channel(channel) {
-            session.channel_failure(channel)?;
-            return Self::wrong_channel();
-        }
-        session.channel_success(channel)?;
+        self.check_channel_request(session, channel)?;
         self.send_window_size(session, col_width, row_height).await
     }
 
@@ -431,9 +435,7 @@ impl server::Handler for Handler {
         data: &[u8],
         session: &mut Session,
     ) -> Result<(), Self::Error> {
-        if !self.check_channel(channel) {
-            return Self::wrong_channel();
-        }
+        self.check_channel(channel)?;
         if let Some(telnet) = &self.telnet {
             let remote = telnet.remote().clone();
             self.send_data(session, remote, data.into()).await
@@ -447,9 +449,7 @@ impl server::Handler for Handler {
         channel: ChannelId,
         session: &mut Session,
     ) -> Result<(), Self::Error> {
-        if !self.check_channel(channel) {
-            return Self::wrong_channel();
-        }
+        self.check_channel(channel)?;
         self.client_eof(session).await
     }
 
