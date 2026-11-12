@@ -12,12 +12,22 @@ use std::str::FromStr;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use syslog::{Facility, Formatter3164, LoggerBackend};
-use tokio::signal::unix::{signal, SignalKind};
+use tokio::signal::unix::{SignalKind, signal};
 use tokio::sync::broadcast;
 
 struct Logger {
     under: Mutex<syslog::Logger<LoggerBackend, Formatter3164>>,
     also_stderr: bool,
+}
+
+/// Connects to syslog (/dev/log).
+fn open_syslog() -> syslog::Result<syslog::Logger<LoggerBackend, Formatter3164>> {
+    syslog::unix(Formatter3164 {
+        facility: Facility::LOG_LOCAL0,
+        hostname: None,
+        process: "bbs-sshd".into(),
+        pid: std::process::id(),
+    })
 }
 
 impl Logger {
@@ -26,6 +36,20 @@ impl Logger {
             under: Mutex::new(under),
             also_stderr,
         }
+    }
+}
+
+fn send(
+    under: &mut syslog::Logger<LoggerBackend, Formatter3164>,
+    level: log::Level,
+    message: &str,
+) -> syslog::Result<()> {
+    match level {
+        log::Level::Error => under.err(message),
+        log::Level::Warn => under.warning(message),
+        log::Level::Info => under.info(message),
+        log::Level::Debug => under.debug(message),
+        log::Level::Trace => under.debug(message),
     }
 }
 
@@ -52,13 +76,14 @@ impl log::Log for Logger {
                     message
                 );
             }
-            let _ = match record.level() {
-                log::Level::Error => under.err(message),
-                log::Level::Warn => under.warning(message),
-                log::Level::Info => under.info(message),
-                log::Level::Debug => under.debug(message),
-                log::Level::Trace => under.debug(message),
-            };
+            // A restarted syslogd makes a new /dev/log: the old connection
+            // fails from then on (every line was lost after "service rsyslog
+            // restart"). Connect again and retry once.
+            if send(&mut under, record.level(), &message).is_err() {
+                let Ok(fresh) = open_syslog() else { return };
+                *under = fresh;
+                let _ = send(&mut under, record.level(), &message);
+            }
         }
     }
 
@@ -84,7 +109,7 @@ fn write_pid_file(cfg: &config::Config) {
 }
 
 fn drop_privileges(cfg: &config::Config) {
-    use nix::unistd::{setgid, setuid, Gid, Uid};
+    use nix::unistd::{Gid, Uid, setgid, setuid};
     if let Some(gid) = cfg.gid {
         setgid(Gid::from_raw(gid)).expect("failed to set gid");
     }
@@ -186,13 +211,7 @@ fn main() {
         write_pid_file(&cfg);
     }
 
-    let logger = syslog::unix(Formatter3164 {
-        facility: Facility::LOG_LOCAL0,
-        hostname: None,
-        process: "bbs-sshd".into(),
-        pid: std::process::id(),
-    })
-    .expect("unable to start logging");
+    let logger = open_syslog().expect("unable to start logging");
     log::set_boxed_logger(Box::new(Logger::new(logger, foreground))).unwrap();
     log::set_max_level(cfg.log_level.unwrap_or(log::LevelFilter::Info));
 
