@@ -85,6 +85,7 @@ pub(crate) struct Handler {
     encoding: u32,
     lport: u16,
     window_size: WindowSize,
+    term: String,
     logind_path: Arc<PathBuf>,
     telnet: Option<telnet::Telnet>,
     channel: Option<ChannelId>,
@@ -107,6 +108,7 @@ impl Handler {
             encoding: logind::ConnData::CONV_NORMAL,
             lport,
             window_size: WindowSize::new(),
+            term: String::new(),
             logind_path,
             telnet: None,
             channel: None,
@@ -140,6 +142,18 @@ impl Handler {
             return Ok(());
         }
         info!("[client {}] Opened a connection to logind", self.addr);
+        // What the client is, to tell programs apart later (logs only): its
+        // SSH identification string (e.g. "SSH-2.0-PuTTY_Release_0.81"), the
+        // terminal type and size it asked for, and the user (encoding).
+        info!(
+            "[client {}] Client: id {:?} term {:?} size {}x{} user {}",
+            self.addr,
+            String::from_utf8_lossy(session.remote_sshid()),
+            self.term,
+            self.window_size.cols,
+            self.window_size.rows,
+            logind::encoding_name(self.encoding)
+        );
 
         let conn = UnixStream::connect(self.logind_path.as_ref()).await?;
 
@@ -147,7 +161,7 @@ impl Handler {
             addr: self.addr,
             encoding: self.encoding,
             lport: self.lport,
-            flags: logind::ConnData::CONN_FLAG_SECURE,
+            flags: logind::ConnData::CONN_FLAG_SECURE | logind::ConnData::CONN_FLAG_SSH,
         };
         Self::send_to_conn(&conn, conn_data.serialize().unwrap()).await?;
 
@@ -341,6 +355,7 @@ impl server::Handler for Handler {
             "[client {}] pty_request: term {}, {} cols {} rows",
             self.addr, term, col_width, row_height,
         );
+        self.term = term.chars().take(64).collect();
         debug!(
             "[client {}] pty_request: pix w {} h {}, modes: {:?}",
             self.addr, pix_width, pix_height, modes

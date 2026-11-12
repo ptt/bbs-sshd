@@ -13,6 +13,9 @@ impl ConnData {
     pub const CONV_UTF8: u32 = 1;
 
     pub const CONN_FLAG_SECURE: u32 = 1;
+    /// From bbs-sshd (CONN_FLAG_SSH in pttbbs include/daemons.h): tells logind
+    /// the login came in over SSH.
+    pub const CONN_FLAG_SSH: u32 = 1 << 2;
 
     pub fn serialize(&self) -> Option<Vec<u8>> {
         use bytes::BufMut;
