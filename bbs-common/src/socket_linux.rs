@@ -74,6 +74,8 @@ fn listening_on(path: &Path) -> bool {
 }
 
 /// TCP options for a client connection: no delays, and a long keepalive.
+///
+/// A failure consumes the stream.
 pub fn set_client_conn_options(stream: TcpStream) -> Result<TcpStream> {
     let sock = Socket::from(stream.into_std()?);
     sock.set_tcp_nodelay(true)?;

@@ -468,9 +468,12 @@ impl Accept for Sshd {
         logind_path: Arc<PathBuf>,
     ) {
         // The socket options a client connection wants, which a unix socket has
-        // none of.
-        let stream =
-            socket_linux::set_client_conn_options(stream).expect("unable to set socket options");
+        // none of. A socket that refuses them is closed, and the client has to
+        // connect again.
+        let Ok(stream) = socket_linux::set_client_conn_options(stream) else {
+            error!("[client {peer}] Unable to set socket options, closing the connection");
+            return;
+        };
         let handler = Handler::new(peer, lport, logind_path);
         if let Err(e) = run_forwarding(self.config, stream, handler).await {
             error!("[client {peer}] SSH session ended: {e}");

@@ -10,10 +10,12 @@ use std::os::unix::net::UnixListener;
 use std::path::PathBuf;
 use std::str::FromStr;
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 use tokio::net::{TcpListener, TcpStream, UnixListener as TokioUnixListener, UnixStream};
 use tokio::signal::unix::{SignalKind, signal};
 use tokio::sync::broadcast;
 use tokio::task::JoinSet;
+use tokio::time::sleep;
 
 /// What a server does with one accepted connection: gets the socket it came in
 /// on and the `logind` socket path to forward the connection to, by the kind of
@@ -337,45 +339,81 @@ async fn run_one_server<A: Accept>(
     let server = Server::start(listener).expect("unable to start listening");
 
     let mut join_set = JoinSet::new();
-    // What a listener yields and which `Accept` method serves it belong
-    // together, so each kind has its own loop; `stop` ends both the same way.
-    match server {
-        Server::Tcp(listener, lport) => loop {
-            tokio::select! {
-                biased;
-                _ = stop.recv() => break,
-                accepted = listener.accept() => {
-                    let (stream, peer) = accepted.expect("unable to accept connection");
-                    let logind_path = logind_paths.next().clone();
-                    join_set.spawn(
-                        accept
-                            .clone()
-                            .accept_tcp(stream, peer, lport, logind_path),
-                    );
+    // One loop serves both kinds: `Server::accept` takes the next client of
+    // the kind its listener is, and `Accepted::serve` answers it with the
+    // `Accept` method for that kind. Accepts that fail in a row are waited
+    // out; one that works ends the run of them.
+    let mut misses = 0;
+    loop {
+        let accepted = tokio::select! {
+            biased;
+            _ = stop.recv() => break,
+            accepted = server.accept(&mut logind_paths) => accepted,
+        };
+        match accepted {
+            Ok(accepted) => {
+                misses = 0;
+                join_set.spawn(accepted.serve(accept.clone()));
+            }
+            Err(e) => {
+                // A client that came in and went away before the accept landed.
+                if e.kind() == std::io::ErrorKind::ConnectionAborted {
+                    info!("a client went away before it was accepted: {e}");
+                    continue;
+                }
+                misses += 1;
+                let delay = backoff_delay(misses);
+                error!("unable to accept a client, {misses} in a row, waiting {delay:?}: {e}");
+                if backoff(misses, &mut stop).await {
+                    break;
                 }
             }
-        },
-        Server::Unix(listener) => loop {
-            tokio::select! {
-                biased;
-                _ = stop.recv() => break,
-                accepted = listener.accept() => {
-                    let (stream, _peer) = accepted.expect("unable to accept connection");
-                    let logind_path = logind_paths.next().clone();
-                    join_set.spawn(accept.clone().accept_unix(stream, logind_path));
-                }
-            }
-        },
+        }
     }
-    // The match takes the listeners apart, and each arm drops its own once its
-    // loop is over, which stops accepting for that kind.
+    // Dropping `server` stops accepting for this listener, and this waits out
+    // the clients that are still connected.
     while join_set.join_next().await.is_some() {}
+}
+
+/// The wait an accept loop starts with after a failed accept, and the most its
+/// run of failures grows it to.
+const BACKOFF_FIRST: Duration = Duration::from_millis(50);
+const BACKOFF_MAX: Duration = Duration::from_secs(30);
+
+/// The wait before the accept that follows `misses` accepts that failed in a
+/// row: the first wait, doubled per failure, capped.
+fn backoff_delay(misses: u32) -> Duration {
+    (BACKOFF_FIRST * (1u32 << misses.saturating_sub(1).min(10))).min(BACKOFF_MAX)
+}
+
+/// Wait out the delay `misses` failures in a row asks for, and report `stop`
+/// as ending the wait early, which is what ends the accept loop.
+async fn backoff(misses: u32, stop: &mut broadcast::Receiver<()>) -> bool {
+    tokio::select! {
+        biased;
+        _ = stop.recv() => true,
+        _ = sleep(backoff_delay(misses)) => false,
+    }
 }
 
 /// A tokio listener, ready to accept, with the local port of a TCP socket.
 enum Server {
     Tcp(TcpListener, u16),
     Unix(TokioUnixListener),
+}
+
+/// One accepted client, by the kind of socket it arrived over.
+enum Accepted {
+    Tcp {
+        stream: TcpStream,
+        peer: SocketAddr,
+        lport: u16,
+        logind_path: Arc<PathBuf>,
+    },
+    Unix {
+        stream: UnixStream,
+        logind_path: Arc<PathBuf>,
+    },
 }
 
 impl Server {
@@ -394,6 +432,51 @@ impl Server {
                 TokioUnixListener::from_std(listener)
                     .expect("unable to convert UnixListener into tokio"),
             )),
+        }
+    }
+
+    /// The next client of this listener's own kind. A client that arrives
+    /// takes the next `logind` path, a failed accept takes none.
+    async fn accept(
+        &self,
+        logind_paths: &mut RoundRobin<Arc<PathBuf>>,
+    ) -> std::io::Result<Accepted> {
+        match self {
+            Server::Tcp(listener, lport) => {
+                let (stream, peer) = listener.accept().await?;
+                Ok(Accepted::Tcp {
+                    stream,
+                    peer,
+                    lport: *lport,
+                    logind_path: logind_paths.next().clone(),
+                })
+            }
+            Server::Unix(listener) => {
+                let (stream, _peer) = listener.accept().await?;
+                Ok(Accepted::Unix {
+                    stream,
+                    logind_path: logind_paths.next().clone(),
+                })
+            }
+        }
+    }
+}
+
+impl Accepted {
+    /// Serve this client with the `Accept` method that fits the kind it came
+    /// over, as one task to spawn.
+    async fn serve<A: Accept>(self, accept: A) {
+        match self {
+            Accepted::Tcp {
+                stream,
+                peer,
+                lport,
+                logind_path,
+            } => accept.accept_tcp(stream, peer, lport, logind_path).await,
+            Accepted::Unix {
+                stream,
+                logind_path,
+            } => accept.accept_unix(stream, logind_path).await,
         }
     }
 }
@@ -570,5 +653,17 @@ mod tests {
         drop(stream);
         drop(conn);
         drop(server);
+    }
+
+    #[test]
+    fn backoff_doubles_to_its_cap() {
+        // The first failure waits the least, every one after it in a row
+        // doubles that, and the run stops growing at the cap.
+        assert_eq!(backoff_delay(1), BACKOFF_FIRST);
+        assert_eq!(backoff_delay(2), BACKOFF_FIRST * 2);
+        assert_eq!(backoff_delay(7), BACKOFF_FIRST * 64);
+        assert_eq!(backoff_delay(10), BACKOFF_FIRST * 512);
+        assert_eq!(backoff_delay(11), BACKOFF_MAX);
+        assert_eq!(backoff_delay(u32::MAX), BACKOFF_MAX);
     }
 }

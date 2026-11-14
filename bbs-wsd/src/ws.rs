@@ -164,9 +164,12 @@ pub async fn serve_tcp(
     params: Arc<Params>,
 ) {
     // The socket options a client connection wants, which a unix socket has
-    // none of.
-    let stream =
-        socket_linux::set_client_conn_options(stream).expect("unable to set socket options");
+    // none of. A socket that refuses them is closed, and the client has to
+    // connect again.
+    let Ok(stream) = socket_linux::set_client_conn_options(stream) else {
+        error!("[client {peer}] Unable to set socket options, closing the connection");
+        return;
+    };
     let result = forwarding(stream, Some(peer), lport, &logind_path, params).await;
     if let Err(e) = result {
         info!("[client {peer}] WebSocket session ended: {e}");
