@@ -372,6 +372,7 @@ async fn run_one_server<A: Accept>(
     }
     // Dropping `server` stops accepting for this listener, and this waits out
     // the clients that are still connected.
+    drop(server);
     while join_set.join_next().await.is_some() {}
 }
 
