@@ -5,43 +5,48 @@ use crate::config::DaemonConfig;
 use crate::socket_linux;
 use log::{error, info};
 use std::future::Future;
-use std::io::{self, IoSlice};
-use std::net::{IpAddr, Ipv4Addr, SocketAddr};
-use std::os::unix::io::AsRawFd;
+use std::net::SocketAddr;
 use std::os::unix::net::UnixListener;
 use std::path::PathBuf;
-use std::pin::Pin;
 use std::str::FromStr;
 use std::sync::{Arc, Mutex};
-use std::task::{Context, Poll};
-use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
-use tokio::net::tcp::{OwnedReadHalf as TcpReadHalf, OwnedWriteHalf as TcpWriteHalf};
-use tokio::net::unix::{OwnedReadHalf as UnixReadHalf, OwnedWriteHalf as UnixWriteHalf};
 use tokio::net::{TcpListener, TcpStream, UnixListener as TokioUnixListener, UnixStream};
 use tokio::signal::unix::{SignalKind, signal};
 use tokio::sync::broadcast;
 use tokio::task::JoinSet;
 
-/// What a server does with one accepted connection: gets the accepted stream,
-/// the client address, the local port, and the `logind` socket path to forward
-/// the connection to.
+/// What a server does with one accepted connection: gets the socket it came in
+/// on and the `logind` socket path to forward the connection to, by the kind of
+/// socket the client arrived over.
 ///
-/// The stream is the whole connection, so a server that serves it on one half
-/// keeps the other half to end the connection once the session is over.
+/// Both methods default to logging the connection away and dropping the socket,
+/// for a daemon that has nothing to serve one kind of client with.
 ///
-/// `accept` takes the acceptor by value, so the future owns its state and is
-/// `'static`: the loop just clones the acceptor and spawns the future.
-///
-/// It must never panic and is responsible for logging its own failures, since
-/// the accept loop ignores its result.
+/// It is responsible for logging its own failures; the accept loop ignores its result.
 pub trait Accept: Clone + Send + Sync + 'static {
-    fn accept(
+    /// Serve one TCP client.
+    fn accept_tcp(
         self,
-        stream: Stream,
-        client_addr: SocketAddr,
+        stream: TcpStream,
+        peer: SocketAddr,
         lport: u16,
         logind_path: Arc<PathBuf>,
-    ) -> impl Future<Output = ()> + Send;
+    ) -> impl Future<Output = ()> + Send {
+        let _ = (stream, peer, lport, logind_path);
+        error!("nothing to serve a TCP client with: closing the connection");
+        std::future::ready(())
+    }
+
+    /// Serve one unix client.
+    fn accept_unix(
+        self,
+        stream: UnixStream,
+        logind_path: Arc<PathBuf>,
+    ) -> impl Future<Output = ()> + Send {
+        let _ = (stream, logind_path);
+        error!("nothing to serve a unix client with: closing the connection");
+        std::future::ready(())
+    }
 }
 
 /// A socket to accept clients on: a TCP address, or a unix socket path, as
@@ -50,260 +55,6 @@ pub enum Listener {
     Tcp(std::net::TcpListener),
     Unix(UnixListener),
 }
-
-/// A connection accepted from a [`Listener`].
-pub enum Stream {
-    Tcp(TcpStream),
-    Unix(UnixStream),
-}
-
-impl Stream {
-    /// Split the connection in halves, so the session served by the read half
-    /// leaves a write half free to stop sending once it is over.
-    ///
-    /// Each half keeps the socket alive, so what the session has already handed
-    /// to the client is not dropped with the session.
-    pub fn into_split(self) -> (Half, Half) {
-        match self {
-            Stream::Tcp(stream) => {
-                let (read, write) = stream.into_split();
-                (Half::TcpRead(read), Half::TcpWrite(write))
-            }
-            Stream::Unix(stream) => {
-                let (read, write) = stream.into_split();
-                (Half::UnixRead(read), Half::UnixWrite(write))
-            }
-        }
-    }
-}
-
-/// One half of a [`Stream`].
-///
-/// A half reads and writes the socket of the connection it came from, so a
-/// session on the read half can still answer the handshake, and the write half
-/// can stop sending.
-pub enum Half {
-    TcpRead(TcpReadHalf),
-    TcpWrite(TcpWriteHalf),
-    UnixRead(UnixReadHalf),
-    UnixWrite(UnixWriteHalf),
-}
-
-impl Half {
-    /// Stop sending, so the peer sees EOF and reads whatever is already on its
-    /// way to it.
-    ///
-    /// Closing a unix socket drops the frames the peer has not read, while a
-    /// TCP connection lets them through, and a handshake rejection is one.
-    pub async fn shutdown_write(mut self) {
-        use tokio::io::AsyncWriteExt;
-        let _ = self.shutdown().await;
-    }
-}
-
-impl AsyncRead for Half {
-    fn poll_read(
-        self: Pin<&mut Self>,
-        cx: &mut Context<'_>,
-        buf: &mut ReadBuf<'_>,
-    ) -> Poll<io::Result<()>> {
-        match self.get_mut() {
-            Half::TcpRead(half) => Pin::new(half).poll_read(cx, buf),
-            Half::TcpWrite(half) => poll_shared_read(half.as_ref(), cx, buf),
-            Half::UnixRead(half) => Pin::new(half).poll_read(cx, buf),
-            Half::UnixWrite(half) => poll_shared_read(half.as_ref(), cx, buf),
-        }
-    }
-}
-
-impl AsyncWrite for Half {
-    fn poll_write(
-        self: Pin<&mut Self>,
-        cx: &mut Context<'_>,
-        buf: &[u8],
-    ) -> Poll<io::Result<usize>> {
-        match self.get_mut() {
-            Half::TcpRead(half) => poll_shared_write(half.as_ref(), cx, buf),
-            Half::TcpWrite(half) => Pin::new(half).poll_write(cx, buf),
-            Half::UnixRead(half) => poll_shared_write(half.as_ref(), cx, buf),
-            Half::UnixWrite(half) => Pin::new(half).poll_write(cx, buf),
-        }
-    }
-
-    fn poll_write_vectored(
-        self: Pin<&mut Self>,
-        cx: &mut Context<'_>,
-        bufs: &[IoSlice<'_>],
-    ) -> Poll<io::Result<usize>> {
-        match self.get_mut() {
-            Half::TcpRead(half) => poll_shared_write_vectored(half.as_ref(), cx, bufs),
-            Half::TcpWrite(half) => Pin::new(half).poll_write_vectored(cx, bufs),
-            Half::UnixRead(half) => poll_shared_write_vectored(half.as_ref(), cx, bufs),
-            Half::UnixWrite(half) => Pin::new(half).poll_write_vectored(cx, bufs),
-        }
-    }
-
-    fn is_write_vectored(&self) -> bool {
-        true
-    }
-
-    fn poll_flush(self: Pin<&mut Self>, _: &mut Context<'_>) -> Poll<io::Result<()>> {
-        // Nothing of ours is buffered, and a socket queues no write of its own.
-        Poll::Ready(Ok(()))
-    }
-
-    fn poll_shutdown(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
-        match self.get_mut() {
-            Half::TcpRead(half) => shutdown_write(half.as_ref()),
-            Half::TcpWrite(half) => Pin::new(half).poll_shutdown(cx),
-            Half::UnixRead(half) => shutdown_write(half.as_ref()),
-            Half::UnixWrite(half) => Pin::new(half).poll_shutdown(cx),
-        }
-    }
-}
-
-/// The shared-handle methods that both tokio socket types have, which a half
-/// uses for the direction of the socket it does not own.
-trait SharedSocket {
-    fn try_read(&self, buf: &mut [u8]) -> io::Result<usize>;
-    fn poll_read_ready(&self, cx: &mut Context<'_>) -> Poll<io::Result<()>>;
-    fn try_write(&self, buf: &[u8]) -> io::Result<usize>;
-    fn poll_write_ready(&self, cx: &mut Context<'_>) -> Poll<io::Result<()>>;
-}
-
-impl SharedSocket for TcpStream {
-    fn try_read(&self, buf: &mut [u8]) -> io::Result<usize> {
-        self.try_read(buf)
-    }
-
-    fn poll_read_ready(&self, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
-        self.poll_read_ready(cx)
-    }
-
-    fn try_write(&self, buf: &[u8]) -> io::Result<usize> {
-        self.try_write(buf)
-    }
-
-    fn poll_write_ready(&self, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
-        self.poll_write_ready(cx)
-    }
-}
-
-impl SharedSocket for UnixStream {
-    fn try_read(&self, buf: &mut [u8]) -> io::Result<usize> {
-        self.try_read(buf)
-    }
-
-    fn poll_read_ready(&self, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
-        self.poll_read_ready(cx)
-    }
-
-    fn try_write(&self, buf: &[u8]) -> io::Result<usize> {
-        self.try_write(buf)
-    }
-
-    fn poll_write_ready(&self, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
-        self.poll_write_ready(cx)
-    }
-}
-
-/// Read into `buf` from a socket that is shared with the other half.
-fn poll_shared_read<S: SharedSocket>(
-    stream: &S,
-    cx: &mut Context<'_>,
-    buf: &mut ReadBuf<'_>,
-) -> Poll<io::Result<()>> {
-    loop {
-        match stream.try_read(buf.filled_mut()) {
-            // A read of zero bytes is the end of the stream.
-            Ok(0) => return Poll::Ready(Ok(())),
-            Ok(read) => {
-                buf.advance(read);
-                return Poll::Ready(Ok(()));
-            }
-            Err(e) if e.kind() == io::ErrorKind::WouldBlock => match stream.poll_read_ready(cx) {
-                Poll::Ready(Ok(())) => (),
-                Poll::Ready(Err(e)) => return Poll::Ready(Err(e)),
-                Poll::Pending => return Poll::Pending,
-            },
-            Err(e) => return Poll::Ready(Err(e)),
-        }
-    }
-}
-
-/// Write `buf` to a socket that is shared with the other half, picking up where
-/// a partial write left off.
-fn poll_shared_write<S: SharedSocket>(
-    stream: &S,
-    cx: &mut Context<'_>,
-    buf: &[u8],
-) -> Poll<io::Result<usize>> {
-    let mut left = buf;
-    let mut written = 0usize;
-    loop {
-        match stream.try_write(left) {
-            // A write of zero bytes is a socket that took no more.
-            Ok(0) => return stopped(written, Poll::Ready(Ok(written))),
-            Ok(wrote) => {
-                written += wrote;
-                left = &left[wrote..];
-                if left.is_empty() {
-                    return Poll::Ready(Ok(written));
-                }
-            }
-            Err(e) if e.kind() == io::ErrorKind::WouldBlock => match stream.poll_write_ready(cx) {
-                Poll::Ready(Ok(())) => (),
-                Poll::Ready(Err(e)) => return stopped(written, Poll::Ready(Err(e))),
-                Poll::Pending => return stopped(written, Poll::Pending),
-            },
-            Err(e) => return stopped(written, Poll::Ready(Err(e))),
-        }
-    }
-}
-
-/// Write `bufs` to a socket that is shared with the other half.
-fn poll_shared_write_vectored<S: SharedSocket>(
-    stream: &S,
-    cx: &mut Context<'_>,
-    bufs: &[IoSlice<'_>],
-) -> Poll<io::Result<usize>> {
-    // A slice cannot be picked up in mid-slice in stable Rust, so every slice
-    // goes out on its own.
-    let mut written = 0usize;
-    for buf in bufs {
-        match poll_shared_write(stream, cx, buf) {
-            Poll::Ready(Ok(wrote)) => written += wrote,
-            stop => return stopped(written, stop),
-        }
-    }
-    Poll::Ready(Ok(written))
-}
-
-/// The outcome of a write that stopped with `written` bytes gone out: a caller
-/// that wrote nothing keeps the reason to stop for, and a caller that wrote
-/// something takes the bytes.
-fn stopped(written: usize, stop: Poll<io::Result<usize>>) -> Poll<io::Result<usize>> {
-    if written == 0 {
-        stop
-    } else {
-        Poll::Ready(Ok(written))
-    }
-}
-
-/// Stop sending on a socket shared with the other half, so the peer sees EOF
-/// once it has read everything already on its way.
-fn shutdown_write<S: AsRawFd>(stream: &S) -> Poll<io::Result<()>> {
-    let rc = unsafe { libc::shutdown(stream.as_raw_fd(), libc::SHUT_WR) };
-    if rc == 0 {
-        Poll::Ready(Ok(()))
-    } else {
-        Poll::Ready(Err(io::Error::last_os_error()))
-    }
-}
-
-/// What a unix peer looks like to `logind`: no address and no port, so the
-/// client address has to come out of the request.
-pub const NO_PEER: SocketAddr = SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), 0);
 
 /// Prefix of a unix entry in the `bind` list, whose clients have no address of
 /// their own.
@@ -586,18 +337,38 @@ async fn run_one_server<A: Accept>(
     let server = Server::start(listener).expect("unable to start listening");
 
     let mut join_set = JoinSet::new();
-    loop {
-        tokio::select! {
-            biased;
-            _ = stop.recv() => break,
-            accepted = server.accept() => {
-                let (stream, client_addr, lport) = accepted.expect("unable to accept connection");
-                let logind_path = logind_paths.next().clone();
-                join_set.spawn(accept.clone().accept(stream, client_addr, lport, logind_path));
+    // What a listener yields and which `Accept` method serves it belong
+    // together, so each kind has its own loop; `stop` ends both the same way.
+    match server {
+        Server::Tcp(listener, lport) => loop {
+            tokio::select! {
+                biased;
+                _ = stop.recv() => break,
+                accepted = listener.accept() => {
+                    let (stream, peer) = accepted.expect("unable to accept connection");
+                    let logind_path = logind_paths.next().clone();
+                    join_set.spawn(
+                        accept
+                            .clone()
+                            .accept_tcp(stream, peer, lport, logind_path),
+                    );
+                }
             }
-        }
+        },
+        Server::Unix(listener) => loop {
+            tokio::select! {
+                biased;
+                _ = stop.recv() => break,
+                accepted = listener.accept() => {
+                    let (stream, _peer) = accepted.expect("unable to accept connection");
+                    let logind_path = logind_paths.next().clone();
+                    join_set.spawn(accept.clone().accept_unix(stream, logind_path));
+                }
+            }
+        },
     }
-    drop(server);
+    // The match takes the listeners apart, and each arm drops its own once its
+    // loop is over, which stops accepting for that kind.
     while join_set.join_next().await.is_some() {}
 }
 
@@ -623,21 +394,6 @@ impl Server {
                 TokioUnixListener::from_std(listener)
                     .expect("unable to convert UnixListener into tokio"),
             )),
-        }
-    }
-
-    /// The next client, its address, and the local port to report to `logind`.
-    async fn accept(&self) -> std::io::Result<(Stream, SocketAddr, u16)> {
-        match self {
-            Server::Tcp(listener, lport) => {
-                let (stream, client_addr) = listener.accept().await?;
-                Ok((Stream::Tcp(stream), client_addr, *lport))
-            }
-            // A unix peer has no address, and this listener has no port.
-            Server::Unix(listener) => {
-                let (stream, _peer) = listener.accept().await?;
-                Ok((Stream::Unix(stream), NO_PEER, 0))
-            }
         }
     }
 }
@@ -745,16 +501,22 @@ mod tests {
             .local_addr()
             .expect("cannot read the address")
             .port();
-        let server = Server::start(Listener::Tcp(listener)).expect("cannot start listening");
+        let Server::Tcp(server, lport) =
+            Server::start(Listener::Tcp(listener)).expect("cannot start listening")
+        else {
+            panic!("a tcp listener starts a tcp server")
+        };
 
         let conn = tokio::net::TcpStream::connect(format!("127.0.0.1:{port}"))
             .await
             .expect("cannot connect");
-        let (stream, peer, lport) = server.accept().await.expect("no client connected");
-        assert!(matches!(stream, Stream::Tcp(_)));
+        let (stream, peer) = server.accept().await.expect("no client connected");
+        // A TCP client comes with the address of the peer and the port of this
+        // listener.
         assert_eq!(lport, port);
         assert_eq!(peer.ip().to_string(), "127.0.0.1");
 
+        drop(stream);
         drop(conn);
         drop(server);
     }
@@ -767,17 +529,20 @@ mod tests {
         let Listener::Unix(listener) = bind_socket(&entry) else {
             panic!("{entry:?} is a unix bind entry")
         };
-        let server = Server::start(Listener::Unix(listener)).expect("cannot start listening");
+        let Server::Unix(server) =
+            Server::start(Listener::Unix(listener)).expect("cannot start listening")
+        else {
+            panic!("a unix listener starts a unix server")
+        };
 
         let conn = tokio::net::UnixStream::connect(&path)
             .await
             .expect("cannot connect");
-        let (stream, peer, lport) = server.accept().await.expect("no client connected");
-        assert!(matches!(stream, Stream::Unix(_)));
-        // A unix peer has no address, and this listener has no port.
-        assert_eq!(peer, NO_PEER);
-        assert_eq!(lport, 0);
+        let (stream, _peer) = server.accept().await.expect("no client connected");
+        // A unix connection names no `ip:port` and no listener port, which is
+        // what a server has to report a client by.
 
+        drop(stream);
         drop(conn);
         drop(server);
         std::fs::remove_dir_all(&dir).expect("cannot remove the temp dir");
@@ -789,16 +554,20 @@ mod tests {
         let Listener::Unix(listener) = bind_socket(&format!("unix:{name}")) else {
             panic!("an abstract entry is a unix listener")
         };
-        let server = Server::start(Listener::Unix(listener)).expect("cannot start listening");
+        let Server::Unix(server) =
+            Server::start(Listener::Unix(listener)).expect("cannot start listening")
+        else {
+            panic!("a unix listener starts a unix server")
+        };
 
         // The address behind the `@` spelling is a NUL byte and the name.
         let path = PathBuf::from(format!("\0{}", &name[1..]));
         let conn = tokio::net::UnixStream::connect(&path)
             .await
             .expect("cannot connect an abstract name");
-        let (stream, _, _) = server.accept().await.expect("no client connected");
-        assert!(matches!(stream, Stream::Unix(_)));
+        let (stream, _peer) = server.accept().await.expect("no client connected");
 
+        drop(stream);
         drop(conn);
         drop(server);
     }

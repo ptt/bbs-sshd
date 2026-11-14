@@ -35,7 +35,7 @@
 //!   refused with 500.
 
 use crate::config::WsdConfig;
-use bbs_common::daemon::{Accept, Half, Stream, UNIX_PREFIX};
+use bbs_common::daemon::{Accept, UNIX_PREFIX};
 use bbs_common::logind;
 use bbs_common::socket_linux;
 use bytes::Bytes;
@@ -51,9 +51,9 @@ use std::result::Result as StdResult;
 use std::str::FromStr;
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::UnixStream;
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::net::unix::{OwnedReadHalf, OwnedWriteHalf};
+use tokio::net::{TcpStream, UnixStream};
 use tokio_tungstenite::tungstenite::handshake::server::{
     Callback, ErrorResponse, Request, Response,
 };
@@ -75,9 +75,13 @@ const NO_SUBPROTOCOL: &str = "none";
 pub const NO_IP_HEADER: &str = "ip_header is disabled and a unix peer has no address";
 
 /// The client half of a session: reads what the client sends.
-type WsReader = SplitStream<WebSocketStream<Half>>;
+///
+/// A session borrows the socket the client came in on, of the TCP or the unix
+/// kind, so the socket is left with the session to stop sending on once it is
+/// over.
+type WsReader<'a, S> = SplitStream<WebSocketStream<&'a mut S>>;
 /// The write half of a session: sends `logind` output to the client.
-type WsSink = SplitSink<WebSocketStream<Half>, Message>;
+type WsSink<'a, S> = SplitSink<WebSocketStream<&'a mut S>, Message>;
 
 /// Settings of the WebSocket front-end, shared by all connections.
 #[derive(Clone, Debug)]
@@ -147,98 +151,137 @@ struct Handshake {
     client_code: u32,
 }
 
-/// Serve one WebSocket client until it goes away, forwarding it to `logind`.
-pub async fn serve_one(
-    stream: Stream,
+/// Serve one TCP WebSocket client until it goes away, forwarding it to
+/// `logind`.
+///
+/// The peer address is the client when the header names none, and the listener
+/// has the port to report to `logind`.
+pub async fn serve_tcp(
+    stream: TcpStream,
     peer: SocketAddr,
     lport: u16,
     logind_path: Arc<PathBuf>,
     params: Arc<Params>,
 ) {
-    // A unix connection has no peer address to name the client, and no TCP
-    // options to set.
-    let (stream, peer, unix) = match stream {
-        Stream::Tcp(stream) => {
-            let stream = socket_linux::set_client_conn_options(stream)
-                .expect("unable to set socket options");
-            // The TCP peer is the client when the header names none.
-            let peer = stream.peer_addr().unwrap_or(peer);
-            (Stream::Tcp(stream), peer, false)
-        }
-        stream @ Stream::Unix(_) => (stream, peer, true),
-    };
-    // The session runs on the read half, so the write half stays free to hand
-    // the client EOF once the session is over.
-    let (session, write) = stream.into_split();
-    let result = forwarding(session, peer, unix, lport, &logind_path, params).await;
-    write.shutdown_write().await;
+    // The socket options a client connection wants, which a unix socket has
+    // none of.
+    let stream =
+        socket_linux::set_client_conn_options(stream).expect("unable to set socket options");
+    let result = forwarding(stream, Some(peer), lport, &logind_path, params).await;
     if let Err(e) = result {
         info!("[client {peer}] WebSocket session ended: {e}");
     }
 }
 
-async fn forwarding(
-    stream: Half,
-    peer: SocketAddr,
-    unix: bool,
+/// Serve one unix WebSocket client until it goes away, forwarding it to
+/// `logind`.
+///
+/// A unix peer has no peer address of its own, and a unix listener no port, so
+/// the client is the address the header names and the port is reported as 0.
+pub async fn serve_unix(stream: UnixStream, logind_path: Arc<PathBuf>, params: Arc<Params>) {
+    let result = forwarding(stream, None, 0, &logind_path, params).await;
+    if let Err(e) = result {
+        info!("[client {}] WebSocket session ended: {e}", peer_name(None));
+    }
+}
+
+async fn forwarding<S>(
+    mut stream: S,
+    peer: Option<SocketAddr>,
     lport: u16,
     logind_path: &Path,
     params: Arc<Params>,
-) -> Result<(), Box<dyn Error + Send + Sync>> {
+) -> Result<(), Box<dyn Error + Send + Sync>>
+where
+    S: AsyncRead + AsyncWrite + Unpin + Send,
+{
     let mut handshake: Option<Handshake> = None;
-    // A rejected handshake leaves its answer on the way to the client, and the
-    // write half that `serve_one` kept is what lets the client read it.
-    let ws = accept_hdr_async_with_config(
-        stream,
-        WsCallback {
-            out: &mut handshake,
-            peer,
-            unix,
-            params,
-        },
-        Some(ws_config()),
-    )
-    .await?;
-    let handshake = handshake.expect("the handshake callback always yields a handshake");
-    // What the client is, to tell programs apart later (logs only): the
-    // `User-Agent` it sent, which is what `client_code` names it by, and the
-    // subprotocol it settled on.
-    info!(
-        "[client {}] Client: protocol {} encoding {} code {:08x} agent {:?}",
-        handshake.remote,
-        handshake.protocol.unwrap_or(NO_SUBPROTOCOL),
-        logind::encoding_name(handshake.encoding),
-        handshake.client_code,
-        handshake.agent,
-    );
+    // The session runs on halves that borrow the socket the client came in on,
+    // so it has a block of its own to end in: what the socket is left for here
+    // is stopping sending, once nothing of the session reads or writes it. A
+    // handshake that is rejected leaves its answer on the way to the client,
+    // and stopping sending is what lets the client read it.
+    let result = {
+        let ws = match accept_hdr_async_with_config(
+            &mut stream,
+            WsCallback {
+                out: &mut handshake,
+                peer,
+                params,
+            },
+            Some(ws_config()),
+        )
+        .await
+        {
+            Ok(ws) => ws,
+            Err(e) => {
+                stop_sending(&mut stream).await;
+                return Err(e.into());
+            }
+        };
+        let handshake = handshake.expect("the handshake callback always yields a handshake");
+        // What the client is, to tell programs apart later (logs only): the
+        // `User-Agent` it sent, which is what `client_code` names it by, and the
+        // subprotocol it settled on.
+        info!(
+            "[client {}] Client: protocol {} encoding {} code {:08x} agent {:?}",
+            handshake.remote,
+            handshake.protocol.unwrap_or(NO_SUBPROTOCOL),
+            logind::encoding_name(handshake.encoding),
+            handshake.client_code,
+            handshake.agent,
+        );
 
-    let (sink, mut ws_reader) = ws.split();
+        let (sink, mut ws_reader) = ws.split();
 
-    let conn = UnixStream::connect(logind_path).await?;
-    let conn_data = logind::ConnData {
-        addr: handshake.remote,
-        encoding: handshake.encoding,
-        lport,
-        flags: handshake.flags,
-        client_code: handshake.client_code,
+        let conn = UnixStream::connect(logind_path).await?;
+        let conn_data = logind::ConnData {
+            addr: handshake.remote,
+            encoding: handshake.encoding,
+            lport,
+            flags: handshake.flags,
+            client_code: handshake.client_code,
+        };
+        logind::send_to_conn(&conn, &conn_data.serialize().unwrap()).await?;
+        info!(
+            "[client {}] Opened a WebSocket connection to logind {} (encoding {})",
+            handshake.remote,
+            logind_path.display(),
+            logind::encoding_name(handshake.encoding)
+        );
+
+        let (logind_reader, mut logind_writer) = conn.into_split();
+        // Both directions pass bytes as they are: `logind` output goes out in a
+        // binary frame per read, and a client frame goes to `logind` as it is.
+        // Both run in this task, because the halves of the session borrow the
+        // socket and so have nothing of their own to move into a spawn.
+        let to_client = logind_to_client(logind_reader, sink);
+        let from_client = async {
+            let result = client_to_logind(&mut ws_reader, &mut logind_writer).await;
+            // Let `logind` see EOF once the client is gone.
+            let _ = logind_writer.shutdown().await;
+            drain_client(&mut ws_reader).await;
+            result
+        };
+        tokio::pin!(to_client, from_client);
+        let (_to_client, result) = tokio::join!(to_client, from_client);
+        result
     };
-    logind::send_to_conn(&conn, &conn_data.serialize().unwrap()).await?;
-    info!(
-        "[client {}] Opened a WebSocket connection to logind {} (encoding {})",
-        handshake.remote,
-        logind_path.display(),
-        logind::encoding_name(handshake.encoding)
-    );
-
-    let (logind_reader, mut logind_writer) = conn.into_split();
-    // Both directions pass bytes as they are: `logind` output goes out in a
-    // binary frame per read, and a client frame goes to `logind` as it is.
-    tokio::spawn(logind_to_client(logind_reader, sink));
-    let result = client_to_logind(&mut ws_reader, &mut logind_writer).await;
-    // Let `logind` see EOF once the client is gone.
-    let _ = logind_writer.shutdown().await;
-    drain_client(&mut ws_reader).await;
+    // Stop sending, so the client sees EOF and reads whatever of the session it
+    // has not read yet.
+    stop_sending(&mut stream).await;
     result
+}
+
+/// Stop sending on the socket of a session, so the peer sees EOF and reads
+/// whatever is already on its way to it.
+///
+/// Closing a unix socket drops the frames the peer has not read, while a TCP
+/// connection lets them through, and a handshake rejection is one, so this is
+/// `shutdown(SHUT_WR)`, which tokio's `AsyncWriteExt::shutdown` is on both
+/// kinds of socket.
+async fn stop_sending<S: AsyncWrite + Unpin>(stream: &mut S) {
+    let _ = stream.shutdown().await;
 }
 
 /// A client that is done has this long to close its side of the connection.
@@ -250,17 +293,15 @@ const CLOSE_GRACE: Duration = Duration::from_secs(30);
 /// Closing a unix socket drops the frames the client has not read, while a TCP
 /// connection lets them through, so the session has to stay open until the
 /// client has taken everything.
-async fn drain_client(ws: &mut WsReader) {
+async fn drain_client<S: AsyncRead + AsyncWrite + Unpin>(ws: &mut WsReader<'_, S>) {
     let _ = tokio::time::timeout(CLOSE_GRACE, async { while ws.next().await.is_some() {} }).await;
 }
 
 /// Handshake callback: negotiates the session and stores it in `out`.
 struct WsCallback<'a> {
     out: &'a mut Option<Handshake>,
-    peer: SocketAddr,
-    /// Whether the connection came in on a unix socket, which has no peer
-    /// address to name the client.
-    unix: bool,
+    /// The address of the TCP peer, which a unix client has none of.
+    peer: Option<SocketAddr>,
     params: Arc<Params>,
 }
 
@@ -270,7 +311,7 @@ impl Callback for WsCallback<'_> {
         request: &Request,
         response: Response,
     ) -> StdResult<Response, ErrorResponse> {
-        match handshake(request, self.peer, self.unix, &self.params) {
+        match handshake(request, self.peer, &self.params) {
             Ok(handshake) => {
                 // The subprotocol to echo back is known before the handshake is
                 // handed over to the session.
@@ -289,8 +330,7 @@ impl Callback for WsCallback<'_> {
 /// Negotiate the session from the handshake request.
 fn handshake(
     req: &Request,
-    peer: SocketAddr,
-    unix: bool,
+    peer: Option<SocketAddr>,
     params: &Params,
 ) -> Result<Handshake, (StatusCode, String)> {
     if req.uri().path() != params.path.as_ref() {
@@ -311,8 +351,7 @@ fn handshake(
         }
     };
 
-    let remote =
-        client_addr(req, params, peer, unix).map_err(|(_, reason)| refused(peer, reason))?;
+    let remote = client_addr(req, params, peer).map_err(|(_, reason)| refused(peer, reason))?;
     let secure = secure_flag(req, params).map_err(|(_, reason)| refused(peer, reason))?;
     let agent = agent(req);
     Ok(Handshake {
@@ -335,9 +374,19 @@ fn handshake(
 /// A request that cannot be served is a misconfiguration, a proxy that sends
 /// no client address or says nothing about TLS, so the session never starts and
 /// the reason goes to the log, with the answer that goes to the client.
-fn refused(peer: SocketAddr, reason: String) -> (StatusCode, String) {
-    error!("[client {peer}] {reason}: refusing the connection");
+fn refused(peer: Option<SocketAddr>, reason: String) -> (StatusCode, String) {
+    error!(
+        "[client {}] {reason}: refusing the connection",
+        peer_name(peer)
+    );
     server_error(reason)
+}
+
+/// What to call a connection in a log line: the address of the TCP peer, or
+/// the kind of socket it came in on, which has no address.
+fn peer_name(peer: Option<SocketAddr>) -> String {
+    peer.map(|peer| peer.to_string())
+        .unwrap_or_else(|| "unix".to_string())
 }
 
 /// Whether the session came in over TLS, as the configured `secure_header`
@@ -408,19 +457,19 @@ fn header_values<K: AsHeaderName>(req: &Request, name: K) -> impl Iterator<Item 
 /// `ip_header`: the first of its values that is an `ip:port` (an IPv6 address
 /// in brackets), the first of a comma-separated list. Nothing else names the
 /// client, so a request whose header names no `ip:port` is refused, as is one
-/// whose header names nothing at all; a unix connection with the header
-/// disabled has no peer address of its own, so it is refused too.
+/// whose header names nothing at all; a unix client with the header disabled
+/// has no peer address of its own, so it is refused too.
 fn client_addr(
     req: &Request,
     params: &Params,
-    peer: SocketAddr,
-    unix: bool,
+    peer: Option<SocketAddr>,
 ) -> Result<SocketAddr, (StatusCode, String)> {
-    // The config disabled the header, so the TCP peer address names the client.
+    // The config disabled the header, so a TCP peer names its own client, and
+    // a unix client has no address of its own.
     let Some(header) = params.ip_header.as_ref() else {
-        return match unix {
-            false => Ok(peer),
-            true => Err(server_error(NO_IP_HEADER.to_string())),
+        return match peer {
+            Some(peer) => Ok(peer),
+            None => Err(server_error(NO_IP_HEADER.to_string())),
         };
     };
     let name = header.as_str();
@@ -474,7 +523,10 @@ fn ws_config() -> WebSocketConfig {
 const LOGIND_READ: usize = 4 * 1024;
 
 /// Send everything `logind` has to say to the client, then close the session.
-async fn logind_to_client(mut logind: OwnedReadHalf, mut ws: WsSink) -> io::Result<()> {
+async fn logind_to_client<S: AsyncRead + AsyncWrite + Unpin>(
+    mut logind: OwnedReadHalf,
+    mut ws: WsSink<'_, S>,
+) -> io::Result<()> {
     let mut buf = vec![0; LOGIND_READ];
     loop {
         let read = logind.read(&mut buf).await?;
@@ -496,8 +548,8 @@ async fn logind_to_client(mut logind: OwnedReadHalf, mut ws: WsSink) -> io::Resu
 }
 
 /// Forward client messages to `logind` as they are, until the client goes away.
-async fn client_to_logind(
-    ws: &mut WsReader,
+async fn client_to_logind<S: AsyncRead + AsyncWrite + Unpin>(
+    ws: &mut WsReader<'_, S>,
     logind: &mut OwnedWriteHalf,
 ) -> Result<(), Box<dyn Error + Send + Sync>> {
     while let Some(msg) = ws.next().await {
@@ -532,8 +584,18 @@ impl Wsd {
 }
 
 impl Accept for Wsd {
-    async fn accept(self, stream: Stream, peer: SocketAddr, lport: u16, logind_path: Arc<PathBuf>) {
-        serve_one(stream, peer, lport, logind_path, self.params).await
+    async fn accept_tcp(
+        self,
+        stream: TcpStream,
+        peer: SocketAddr,
+        lport: u16,
+        logind_path: Arc<PathBuf>,
+    ) {
+        serve_tcp(stream, peer, lport, logind_path, self.params).await
+    }
+
+    async fn accept_unix(self, stream: UnixStream, logind_path: Arc<PathBuf>) {
+        serve_unix(stream, logind_path, self.params).await
     }
 }
 
@@ -645,55 +707,56 @@ mod tests {
         let peer = SocketAddr::from(([127, 0, 0, 1], 8081));
         let client = |addr: &str| addr.parse::<SocketAddr>().expect("an ip:port");
         // The header of the config names the client and nothing else does, so
-        // a request it names no client in is refused, over TCP as well as over
-        // unix. A client address is an `ip:port`, so a bare address names no
-        // client, and so does a value that is no address at all.
-        for (headers, unix, want) in [
+        // a request it names no client in is refused, over a TCP connection as
+        // well as over a unix socket. A client address is an `ip:port`, so a
+        // bare address names no client, and so does a value that is no address
+        // at all.
+        for (headers, peer, want) in [
             (
                 &[("x-bbs-client-ip", "203.0.113.7:4321")][..],
-                false,
+                Some(peer),
                 Ok(client("203.0.113.7:4321")),
             ),
             (
                 &[("x-bbs-client-ip", "203.0.113.7:4321")][..],
-                true,
+                None,
                 Ok(client("203.0.113.7:4321")),
             ),
             (
                 &[("x-bbs-client-ip", "[2001:db8::1]:4321")][..],
-                true,
+                None,
                 Ok(client("[2001:db8::1]:4321")),
             ),
             (
                 &[("x-bbs-client-ip", "203.0.113.7")][..],
-                false,
+                Some(peer),
                 refused("x-bbs-client-ip names no ip:port"),
             ),
             (
                 &[("x-bbs-client-ip", "203.0.113.7")][..],
-                true,
+                None,
                 refused("x-bbs-client-ip names no ip:port"),
             ),
             (
                 &[("x-bbs-client-ip", "2001:db8::1")][..],
-                false,
+                Some(peer),
                 refused("x-bbs-client-ip names no ip:port"),
             ),
             // In a chain the leftmost `ip:port` is the client, and a value that
             // names none is passed over for the next value of the header.
             (
                 &[("x-bbs-client-ip", "203.0.113.7:4321, 192.0.2.1")][..],
-                true,
+                None,
                 Ok(client("203.0.113.7:4321")),
             ),
             (
                 &[("x-bbs-client-ip", "unknown, 192.0.2.1:4321")][..],
-                false,
+                Some(peer),
                 Ok(client("192.0.2.1:4321")),
             ),
             (
                 &[("x-bbs-client-ip", "203.0.113.7, 192.0.2.1")][..],
-                false,
+                Some(peer),
                 refused("x-bbs-client-ip names no ip:port"),
             ),
             // A header that is not the configured one names no client, and so
@@ -701,32 +764,32 @@ mod tests {
             // nothing at all is as good as one that is not there.
             (
                 &[("x-real-ip", "203.0.113.7")][..],
-                false,
+                Some(peer),
                 refused("x-bbs-client-ip is missing"),
             ),
-            (&[][..], false, refused("x-bbs-client-ip is missing")),
-            (&[][..], true, refused("x-bbs-client-ip is missing")),
+            (&[][..], Some(peer), refused("x-bbs-client-ip is missing")),
+            (&[][..], None, refused("x-bbs-client-ip is missing")),
             (
                 &[("x-bbs-client-ip", "")][..],
-                false,
+                Some(peer),
                 refused("x-bbs-client-ip is missing"),
             ),
             (
                 &[("x-bbs-client-ip", "unknown")][..],
-                false,
+                Some(peer),
                 refused("x-bbs-client-ip names no ip:port"),
             ),
             (
                 &[("x-bbs-client-ip", "unknown")][..],
-                true,
+                None,
                 refused("x-bbs-client-ip names no ip:port"),
             ),
         ] {
             assert_eq!(
-                client_addr(&request(headers), &params, peer, unix),
+                client_addr(&request(headers), &params, peer),
                 want,
                 "{headers:?} over {}",
-                if unix { "unix" } else { "TCP" }
+                if peer.is_none() { "unix" } else { "TCP" }
             );
         }
     }
@@ -735,19 +798,18 @@ mod tests {
     fn a_disabled_header_leaves_the_tcp_peer_to_name_the_client() {
         let params = settings("", DEFAULT_SECURE_HEADER);
         let peer = SocketAddr::from(([127, 0, 0, 1], 8081));
-        // The header is disabled, so no header names a client: the TCP peer
-        // address does, and a unix peer has no address of its own.
+        // The header is disabled, so no header names a client: a TCP peer
+        // names its own client, and a unix client has no address of its own.
         assert_eq!(
             client_addr(
                 &request(&[("x-bbs-client-ip", "203.0.113.7:4321")]),
                 &params,
-                peer,
-                false
+                Some(peer)
             ),
             Ok(peer),
         );
         assert_eq!(
-            client_addr(&request(&[]), &params, peer, true),
+            client_addr(&request(&[]), &params, None),
             refused(NO_IP_HEADER)
         );
     }

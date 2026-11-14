@@ -1,4 +1,4 @@
-use bbs_common::daemon::{Accept, Stream};
+use bbs_common::daemon::Accept;
 use bbs_common::logind;
 use bbs_common::socket_linux;
 use bbs_common::telnet::{self, WindowSize};
@@ -13,7 +13,7 @@ use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::io::{AsyncRead, AsyncWrite};
-use tokio::net::UnixStream;
+use tokio::net::{TcpStream, UnixStream};
 use tokio::sync::mpsc;
 
 struct TelnetHandler {
@@ -460,25 +460,20 @@ impl Sshd {
 }
 
 impl Accept for Sshd {
-    async fn accept(
+    async fn accept_tcp(
         self,
-        stream: Stream,
-        client_addr: SocketAddr,
+        stream: TcpStream,
+        peer: SocketAddr,
         lport: u16,
         logind_path: Arc<PathBuf>,
     ) {
-        let handler = Handler::new(client_addr, lport, logind_path);
-        let result = match stream {
-            Stream::Tcp(stream) => {
-                let stream = socket_linux::set_client_conn_options(stream)
-                    .expect("unable to set socket options");
-                run_forwarding(self.config, stream, handler).await
-            }
-            // A unix socket has no TCP options to set.
-            Stream::Unix(stream) => run_forwarding(self.config, stream, handler).await,
-        };
-        if let Err(e) = result {
-            error!("[client {client_addr}] SSH session ended: {e}");
+        // The socket options a client connection wants, which a unix socket has
+        // none of.
+        let stream =
+            socket_linux::set_client_conn_options(stream).expect("unable to set socket options");
+        let handler = Handler::new(peer, lport, logind_path);
+        if let Err(e) = run_forwarding(self.config, stream, handler).await {
+            error!("[client {peer}] SSH session ended: {e}");
         }
     }
 }
