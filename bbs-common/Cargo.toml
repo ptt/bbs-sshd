@@ -28,7 +28,7 @@ tokio = {
 # For the daemon process setup: syslog logging, daemonizing, uid/gid and rlimit
 syslog = "7.0.0"
 fork = "0.11.0"
-nix = { version = "0.31.3", features = ["user"] }
+nix = { version = "0.32.0", features = ["user"] }
 rlimit = "0.11.0"
 proctitle = "0.1.1"
 time = "0.3.55"

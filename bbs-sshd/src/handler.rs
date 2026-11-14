@@ -269,7 +269,7 @@ impl server::Handler for Handler {
     async fn auth_publickey_offered(
         &mut self,
         user: &str,
-        _public_key: &russh::keys::PublicKey,
+        _public_key: russh::server::PublicKeyOffer<'_>,
     ) -> Result<Auth, Self::Error> {
         debug!("[client {}] auth_publickey_offered: {}", self.addr, user);
         self.auth_reject()
