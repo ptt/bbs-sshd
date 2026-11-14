@@ -237,7 +237,6 @@ where
 
         let (sink, mut ws_reader) = ws.split();
 
-        let conn = UnixStream::connect(logind_path).await?;
         let conn_data = logind::ConnData {
             addr: handshake.remote,
             encoding: handshake.encoding,
@@ -245,15 +244,14 @@ where
             flags: handshake.flags,
             client_code: handshake.client_code,
         };
-        logind::send_to_conn(&conn, &conn_data.serialize().unwrap()).await?;
+        let conn = logind::connect(logind_path, &conn_data).await?;
+        let (logind_reader, mut logind_writer) = conn.into_split();
         info!(
             "[client {}] Opened a WebSocket connection to logind {} (encoding {})",
             handshake.remote,
             logind_path.display(),
             logind::encoding_name(handshake.encoding)
         );
-
-        let (logind_reader, mut logind_writer) = conn.into_split();
         // Both directions pass bytes as they are: `logind` output goes out in a
         // binary frame per read, and a client frame goes to `logind` as it is.
         // Both run in this task, because the halves of the session borrow the

@@ -13,7 +13,7 @@ use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::io::{AsyncRead, AsyncWrite};
-use tokio::net::{TcpStream, UnixStream};
+use tokio::net::TcpStream;
 use tokio::sync::mpsc;
 
 struct TelnetHandler {
@@ -133,8 +133,6 @@ impl Handler {
             logind::encoding_name(self.encoding)
         );
 
-        let conn = UnixStream::connect(self.logind_path.as_ref()).await?;
-
         let conn_data = logind::ConnData {
             addr: self.addr,
             encoding: self.encoding,
@@ -142,12 +140,12 @@ impl Handler {
             flags: logind::ConnData::CONN_FLAG_SECURE | logind::ConnData::CONN_FLAG_SSH,
             client_code: logind::client_code(session.remote_sshid()),
         };
-        logind::send_to_conn(&conn, &conn_data.serialize().unwrap()).await?;
+
+        let conn = logind::connect(&self.logind_path, &conn_data).await?;
+        let (read_half, write_half) = conn.into_split();
 
         let (tx, rx) = mpsc::channel(4);
         tokio::spawn(ssh_writer(rx, session.handle(), channel));
-
-        let (read_half, write_half) = conn.into_split();
 
         self.telnet = Some(telnet::Telnet::new(1024));
         self.telnet

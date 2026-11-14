@@ -1,6 +1,7 @@
 use bytes::BytesMut;
 use std::io;
 use std::net::SocketAddr;
+use std::path::Path;
 use tokio::net::UnixStream;
 
 pub struct ConnData {
@@ -63,7 +64,7 @@ impl ConnData {
 }
 
 /// Write `data` to a `logind` connection socket, coping with partial writes.
-pub async fn send_to_conn(conn: &UnixStream, data: &[u8]) -> io::Result<()> {
+async fn send_to_conn(conn: &UnixStream, data: &[u8]) -> io::Result<()> {
     let mut sent = 0;
     while sent < data.len() {
         conn.writable().await?;
@@ -74,6 +75,16 @@ pub async fn send_to_conn(conn: &UnixStream, data: &[u8]) -> io::Result<()> {
         };
     }
     Ok(())
+}
+
+/// Open one session towards `logind`. connect its `connfwd` socket at
+///
+/// `logind_path` is the path to the unix socket of `logind` in `connfwd` mode.
+/// The connection data in `conn_data` is sent during this call.
+pub async fn connect(logind_path: &Path, conn_data: &ConnData) -> io::Result<UnixStream> {
+    let conn = UnixStream::connect(logind_path).await?;
+    send_to_conn(&conn, &conn_data.serialize().expect("conn data serializes")).await?;
+    Ok(conn)
 }
 
 pub fn encoding_name(encoding: u32) -> &'static str {
@@ -145,6 +156,86 @@ fn crc32(data: &[u8]) -> u32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::path::PathBuf;
+
+    fn temp_dir(tag: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "bbs-common-{}-{}-{}",
+            std::process::id(),
+            tag,
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).expect("cannot create the temp dir");
+        dir
+    }
+
+    #[tokio::test]
+    async fn opens_a_conn_and_reports_the_session() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let dir = temp_dir("conn");
+        let path = dir.join("logind.sock");
+        let listener = tokio::net::UnixListener::bind(&path).expect("cannot bind");
+
+        let conn_data = ConnData {
+            addr: "127.0.0.1:2022".parse().expect("an address"),
+            encoding: ConnData::CONV_UTF8,
+            lport: 2023,
+            flags: ConnData::CONN_FLAG_SECURE | ConnData::CONN_FLAG_SSH,
+            client_code: 0x1122_3344,
+        };
+        let conn = connect(&path, &conn_data).await.expect("cannot connect");
+        let (mut read_half, mut write_half) = conn.into_split();
+
+        // What `logind` is handed to open the session with: the `connfwd`
+        // header naming the client, then the byte stream both halves carry.
+        let (logind, _peer) = listener.accept().await.expect("no connection");
+        let (mut logind_reader, mut logind_writer) = logind.into_split();
+        let mut header = [0u8; 40];
+        logind_reader
+            .read_exact(&mut header)
+            .await
+            .expect("no header");
+        assert_eq!(&header[..4], &40u32.to_le_bytes());
+        assert_eq!(&header[4..8], &ConnData::CONV_UTF8.to_le_bytes());
+        assert_eq!(&header[8..12], &4u32.to_le_bytes());
+        assert_eq!(&header[12..16], &[127, 0, 0, 1]);
+        assert_eq!(&header[16..28], &[0; 12]);
+        assert_eq!(&header[28..30], &2022u16.to_le_bytes());
+        assert_eq!(&header[30..32], &2023u16.to_le_bytes());
+        assert_eq!(
+            &header[32..36],
+            &(ConnData::CONN_FLAG_SECURE | ConnData::CONN_FLAG_SSH).to_le_bytes()
+        );
+        assert_eq!(&header[36..40], &0x1122_3344u32.to_le_bytes());
+
+        write_half
+            .write_all(b"to logind")
+            .await
+            .expect("cannot write to logind");
+        let mut asked = [0u8; 9];
+        logind_reader
+            .read_exact(&mut asked)
+            .await
+            .expect("nothing reached logind");
+        assert_eq!(&asked, b"to logind");
+
+        logind_writer
+            .write_all(b"from")
+            .await
+            .expect("cannot answer to the client");
+        let mut from_logind = [0u8; 4];
+        read_half
+            .read_exact(&mut from_logind)
+            .await
+            .expect("nothing from logind");
+        assert_eq!(&from_logind, b"from");
+
+        std::fs::remove_dir_all(&dir).expect("cannot remove the temp dir");
+    }
 
     #[test]
     fn program_names() {
