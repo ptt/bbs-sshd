@@ -1,0 +1,56 @@
+# Server bind addresses and ports. A TCP address, a unix socket file as
+# `unix:/path/to/sock`, or a unix abstract socket as `unix:@name`.
+bind = [
+    "127.0.0.1:8081",
+    # "unix:/home/bbs/run/bbs-wsd.sock",
+]
+
+# Optional: Set uid. (default: no set)
+uid = 9999
+
+# Optional: Set gid. (default: no set)
+gid = 99
+
+# Optional: Number of worker threads. (default: 0, single threaded)
+workers = 4
+
+# Optional: Set max number of open files. (default: no set)
+nofile = 10000
+
+# Optional: Write pid file. (default: no pid file)
+pid_file = "/home/bbs/run/bbs-wsd.pid"
+
+# Optional: Log level. (available: ERROR, WARN, INFO, DEBUG, TRACE; default: INFO)
+#log_level = "TRACE"
+
+# Paths to logind, multiple entries supported. Round-robin.
+logind_paths = [
+    "/home/bbs/run/logind.connfwd.sock",
+]
+
+# Optional: WebSocket endpoint path. Clients ask for the "telnet" subprotocol,
+# which carries the raw telnet byte stream, or for no subprotocol; requests
+# offering only other subprotocols are answered 400. There are no query
+# parameters.
+path = "/bbs"
+
+# Optional: Header that tells whether the session came in over TLS, so a login
+# is reported to logind as encrypted: `1` for a secure session, `0` for a plain
+# one. A request whose header is missing, or names neither `0` nor `1`, is
+# refused with 500, and the reason is logged. An empty string disables the
+# header, and every session is insecure then.
+# (default: "X-BBS-Secure")
+secure_header = "X-BBS-Secure"
+
+# Optional: Header that carries the client address as `ip:port` (an IPv6
+# address in brackets): the first value of the header that is an `ip:port` names
+# the client, and in a comma-separated list the first `ip:port` is the client. A
+# bare address with no port of its own names no client. Nothing else names the
+# client, so a connection whose header names no `ip:port` is refused with 500,
+# and the reason is logged.
+#
+# An empty string disables the header, and clients are named by their TCP peer
+# address then. A unix socket connection has no peer address, so a `bind` entry
+# of a unix socket needs a header name here.
+# (default: "X-BBS-Client-IP")
+ip_header = "X-BBS-Client-IP"

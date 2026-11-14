@@ -3,22 +3,17 @@ name = "bbs-sshd"
 version = "0.3.0"
 edition = "2024"
 
-# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+# SSH server that bridges SSH clients to `logind`.
 
 [dependencies]
+bbs-common = { path = "../bbs-common" }
 bytes = "1.12.1"
 russh = "0.64.1"
-tokio = { version = "1.54.1", features = ["signal", "time"] }
-libc = "0.2.191"
-socket2 = { version = "0.6.5", features = ["all"] }
+tokio = {
+    version = "1.54.1",
+    features = ["rt", "net", "io-util", "sync", "time", "macros"],
+}
 log = { version = "0.4.34", features = ["serde", "release_max_level_trace"] }
-syslog = "7.0.0"
-fork = "0.11.0"
-nix = { version = "0.31.3", features = ["user"] }
 clap = { version = "4.6.7", features = ["cargo", "derive"] }
-toml = "1.1.8"
 serde = "1.0.229"
 serde_derive = "1.0.229"
-proctitle = "0.1.1"
-time = "0.3.55"
-rlimit = "0.11.0"

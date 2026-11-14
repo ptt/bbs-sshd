@@ -1,4 +1,5 @@
-# Server bind address and port.
+# Server bind addresses and ports. A TCP address, a unix socket file as
+# `unix:/path/to/sock`, or a unix abstract socket as `unix:@name`.
 bind = [
     "0.0.0.0:22",
 ]

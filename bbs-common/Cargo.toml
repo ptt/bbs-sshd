@@ -1,0 +1,39 @@
+[package]
+name = "bbs-common"
+version = "0.3.0"
+edition = "2024"
+
+# Shared parts of the BBS front-end daemons: `logind` client, telnet protocol,
+# socket options, config files and the daemon startup/accept loop.
+
+[dependencies]
+bytes = "1.12.1"
+libc = "0.2.191"
+socket2 = { version = "0.6.5", features = ["all"] }
+log = { version = "0.4.34", features = ["serde", "release_max_level_trace"] }
+tokio = {
+    version = "1.54.1",
+    features = [
+        "rt",
+        "rt-multi-thread",
+        "net",
+        "io-util",
+        "sync",
+        "signal",
+        "time",
+        "macros",
+    ],
+}
+
+# For the daemon process setup: syslog logging, daemonizing, uid/gid and rlimit
+syslog = "7.0.0"
+fork = "0.11.0"
+nix = { version = "0.31.3", features = ["user"] }
+rlimit = "0.11.0"
+proctitle = "0.1.1"
+time = "0.3.55"
+
+# For config files
+serde = "1.0.229"
+serde_derive = "1.0.229"
+toml = "1.1.8"

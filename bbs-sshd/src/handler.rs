@@ -1,30 +1,20 @@
-use crate::logind;
-use crate::telnet;
+use bbs_common::daemon::{Accept, Stream};
+use bbs_common::logind;
+use bbs_common::socket_linux;
+use bbs_common::telnet::{self, WindowSize};
 use bytes::Bytes;
-use log::{debug, info, trace, warn};
+use log::{debug, error, info, trace, warn};
 use russh::server;
 use russh::server::{Auth, Handle, Msg, Session};
 use russh::{Channel, ChannelId};
 use std::borrow::Cow;
-use std::cmp;
 use std::io;
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
+use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::net::UnixStream;
 use tokio::sync::mpsc;
-
-#[derive(Clone, Copy, Debug)]
-struct WindowSize {
-    pub cols: u16,
-    pub rows: u16,
-}
-
-impl WindowSize {
-    pub fn new() -> Self {
-        WindowSize { cols: 80, rows: 24 }
-    }
-}
 
 struct TelnetHandler {
     tx: mpsc::Sender<Bytes>,
@@ -80,7 +70,7 @@ async fn ssh_writer(
     Ok(())
 }
 
-pub(crate) struct Handler {
+pub struct Handler {
     addr: SocketAddr,
     encoding: u32,
     lport: u16,
@@ -107,26 +97,13 @@ impl Handler {
             addr: client_addr,
             encoding: logind::ConnData::CONV_NORMAL,
             lport,
-            window_size: WindowSize::new(),
+            window_size: WindowSize::initial(),
             term: String::new(),
             logind_path,
             telnet: None,
             channel: None,
             auth_attempts: 0,
         }
-    }
-
-    async fn send_to_conn(conn: &UnixStream, data: Vec<u8>) -> io::Result<()> {
-        let mut sent = 0;
-        while sent < data.len() {
-            conn.writable().await?;
-            match conn.try_write(&data[sent..]) {
-                Ok(n) => sent += n,
-                Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => continue,
-                Err(e) => return Err(e),
-            };
-        }
-        Ok(())
     }
 
     async fn start_conn(
@@ -165,7 +142,7 @@ impl Handler {
             flags: logind::ConnData::CONN_FLAG_SECURE | logind::ConnData::CONN_FLAG_SSH,
             client_code: logind::client_code(session.remote_sshid()),
         };
-        Self::send_to_conn(&conn, conn_data.serialize().unwrap()).await?;
+        logind::send_to_conn(&conn, &conn_data.serialize().unwrap()).await?;
 
         let (tx, rx) = mpsc::channel(4);
         tokio::spawn(ssh_writer(rx, session.handle(), channel));
@@ -189,16 +166,11 @@ impl Handler {
         cols: u32,
         rows: u32,
     ) -> Result<(), russh::Error> {
-        let cols = cmp::min(cmp::max(cols, u16::MIN as u32), u16::MAX as u32) as u16;
-        let rows = cmp::min(cmp::max(rows, u16::MIN as u32), u16::MAX as u32) as u16;
-        self.window_size = WindowSize { cols, rows };
+        self.window_size = WindowSize::new(cols, rows);
         if let Some(telnet) = &self.telnet {
-            let mut neg = [0; 4];
-            neg[..2].copy_from_slice(&cols.to_be_bytes());
-            neg[2..].copy_from_slice(&rows.to_be_bytes());
             telnet
                 .remote()
-                .subnegotiate(telnet::byte::NAWS, neg.into())
+                .subnegotiate(telnet::byte::NAWS, self.window_size.naws_payload())
                 .await?;
             debug!("Sent new window size: {:?}", self.window_size);
         } else {
@@ -461,3 +433,55 @@ impl server::Handler for Handler {
         self.channel_eof(channel, session).await
     }
 }
+
+async fn run_forwarding<S>(
+    config: Arc<russh::server::Config>,
+    stream: S,
+    handler: Handler,
+) -> Result<(), russh::Error>
+where
+    S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+{
+    russh::server::run_stream(config, stream, handler)
+        .await?
+        .await
+}
+
+/// One [`russh`] session per accepted connection.
+#[derive(Clone)]
+pub struct Sshd {
+    config: Arc<russh::server::Config>,
+}
+
+impl Sshd {
+    pub fn new(config: Arc<russh::server::Config>) -> Self {
+        Self { config }
+    }
+}
+
+impl Accept for Sshd {
+    async fn accept(
+        self,
+        stream: Stream,
+        client_addr: SocketAddr,
+        lport: u16,
+        logind_path: Arc<PathBuf>,
+    ) {
+        let handler = Handler::new(client_addr, lport, logind_path);
+        let result = match stream {
+            Stream::Tcp(stream) => {
+                let stream = socket_linux::set_client_conn_options(stream)
+                    .expect("unable to set socket options");
+                run_forwarding(self.config, stream, handler).await
+            }
+            // A unix socket has no TCP options to set.
+            Stream::Unix(stream) => run_forwarding(self.config, stream, handler).await,
+        };
+        if let Err(e) = result {
+            error!("[client {client_addr}] SSH session ended: {e}");
+        }
+    }
+}
+
+/// Name of the SSH service, used in the process title and logs.
+pub const DAEMON: &str = "bbs-sshd";

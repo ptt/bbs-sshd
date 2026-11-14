@@ -1,124 +1,10 @@
-mod config;
-mod handler;
-mod logind;
-mod socket_linux;
-mod telnet;
+use bbs_common::{config::load, daemon};
+use bbs_sshd::{config, handler};
 use clap::Parser;
-use log::{error, info};
-use std::borrow::Cow;
-use std::net::SocketAddr;
-use std::path::PathBuf;
-use std::str::FromStr;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::time::Duration;
-use syslog::{Facility, Formatter3164, LoggerBackend};
-use tokio::signal::unix::{SignalKind, signal};
-use tokio::sync::broadcast;
 
-struct Logger {
-    under: Mutex<syslog::Logger<LoggerBackend, Formatter3164>>,
-    also_stderr: bool,
-}
-
-/// Connects to syslog (/dev/log).
-fn open_syslog() -> syslog::Result<syslog::Logger<LoggerBackend, Formatter3164>> {
-    syslog::unix(Formatter3164 {
-        facility: Facility::LOG_LOCAL0,
-        hostname: None,
-        process: "bbs-sshd".into(),
-        pid: std::process::id(),
-    })
-}
-
-impl Logger {
-    fn new(under: syslog::Logger<LoggerBackend, Formatter3164>, also_stderr: bool) -> Self {
-        Logger {
-            under: Mutex::new(under),
-            also_stderr,
-        }
-    }
-}
-
-fn send(
-    under: &mut syslog::Logger<LoggerBackend, Formatter3164>,
-    level: log::Level,
-    message: &str,
-) -> syslog::Result<()> {
-    match level {
-        log::Level::Error => under.err(message),
-        log::Level::Warn => under.warning(message),
-        log::Level::Info => under.info(message),
-        log::Level::Debug => under.debug(message),
-        log::Level::Trace => under.debug(message),
-    }
-}
-
-impl log::Log for Logger {
-    fn enabled(&self, metadata: &log::Metadata) -> bool {
-        metadata.level().to_level_filter() <= log::max_level()
-    }
-
-    fn log(&self, record: &log::Record) {
-        use time::format_description::well_known::Rfc3339;
-
-        if self.enabled(record.metadata()) {
-            let mut under = self.under.lock().unwrap();
-            let message = format!("{} ({}) {}", record.level(), record.target(), record.args());
-            if self.also_stderr {
-                eprintln!(
-                    "{} {}",
-                    time::OffsetDateTime::now_utc()
-                        // Truncate to seconds.
-                        .replace_microsecond(0)
-                        .unwrap()
-                        .format(&Rfc3339)
-                        .unwrap(),
-                    message
-                );
-            }
-            // A restarted syslogd makes a new /dev/log: the old connection
-            // fails from then on (every line was lost after "service rsyslog
-            // restart"). Connect again and retry once.
-            if send(&mut under, record.level(), &message).is_err() {
-                let Ok(fresh) = open_syslog() else { return };
-                *under = fresh;
-                let _ = send(&mut under, record.level(), &message);
-            }
-        }
-    }
-
-    fn flush(&self) {}
-}
-
-fn daemonize() {
-    // Closing fds is known to be problematic.
-    match fork::daemon(/* nochdir */ false, /* noclose */ true) {
-        Ok(fork::Fork::Child) => (),
-        Ok(fork::Fork::Parent(_)) => std::process::exit(0),
-        Err(e) => {
-            error!("Error daemonizing: {}", e);
-            std::process::exit(1);
-        }
-    }
-}
-
-fn write_pid_file(cfg: &config::Config) {
-    if let Some(pid_file) = &cfg.pid_file {
-        std::fs::write(pid_file, std::process::id().to_string()).expect("failed to write pid file");
-    }
-}
-
-fn drop_privileges(cfg: &config::Config) {
-    use nix::unistd::{Gid, Uid, setgid, setuid};
-    if let Some(gid) = cfg.gid {
-        setgid(Gid::from_raw(gid)).expect("failed to set gid");
-    }
-    if let Some(uid) = cfg.uid {
-        setuid(Uid::from_raw(uid)).expect("failed to set uid");
-    }
-}
-
-fn make_ssh_config(cfg: &config::Config) -> russh::server::Config {
+fn make_ssh_config(cfg: &config::SshConfig) -> russh::server::Config {
     let mut sshcfg = russh::server::Config {
         server_id: russh::SshId::Standard("SSH-2.0-bbs-sshd".into()),
         auth_rejection_time: Duration::ZERO,
@@ -137,7 +23,7 @@ fn make_ssh_config(cfg: &config::Config) -> russh::server::Config {
         .map(|key| key.algorithm())
         .collect::<Vec<_>>()
         .into();
-    sshcfg.preferred.compression = Cow::from(&[russh::compression::NONE]);
+    sshcfg.preferred.compression = std::borrow::Cow::from(&[russh::compression::NONE]);
 
     // Per RFC 4252 Sec. 7, "publickey" method is required. However, we are not going to accept it.
     // "keyboard-interactive" is used for printing out error messages about bad user names.
@@ -151,19 +37,6 @@ fn make_ssh_config(cfg: &config::Config) -> russh::server::Config {
     }
 
     sshcfg
-}
-
-fn bind_ports(cfg: &config::Config) -> Vec<std::net::TcpListener> {
-    cfg.bind
-        .iter()
-        .map(|addr| {
-            socket_linux::new_listener(
-                SocketAddr::from_str(addr).expect("unable to parse bind address"),
-                10,
-            )
-            .expect("unable to create listener socket")
-        })
-        .collect()
 }
 
 #[derive(Parser, Debug)]
@@ -190,154 +63,14 @@ struct Args {
 fn main() {
     let args = Args::parse();
 
-    let cfg: config::Config = toml::from_str(
-        &std::fs::read_to_string(args.config_file).expect("failed to read config file"),
-    )
-    .expect("failed to parse config file");
+    let cfg = load::<config::SshConfig>(&args.config_file);
+    let sshcfg = Arc::new(make_ssh_config(&cfg));
+    let prepared = daemon::startup(&cfg.daemon, handler::DAEMON, args.no_daemon);
 
-    let sshcfg = make_ssh_config(&cfg);
-
-    if let Some(nofile) = cfg.nofile {
-        rlimit::setrlimit(rlimit::Resource::NOFILE, nofile as u64, nofile as u64)
-            .expect("unable to set nofile limit");
-    }
-
-    let listeners = bind_ports(&cfg);
-
-    drop_privileges(&cfg);
-    let foreground = args.no_daemon;
-    if !foreground {
-        daemonize();
-        write_pid_file(&cfg);
-    }
-
-    let logger = open_syslog().expect("unable to start logging");
-    log::set_boxed_logger(Box::new(Logger::new(logger, foreground))).unwrap();
-    log::set_max_level(cfg.log_level.unwrap_or(log::LevelFilter::Info));
-
-    let logind_paths: Vec<Arc<PathBuf>> = cfg
-        .logind_paths
-        .iter()
-        .map(|p| Arc::new(PathBuf::from(p)))
-        .collect();
-    if logind_paths.is_empty() {
-        error!("logind_paths is empty");
-        std::process::exit(1);
-    }
-
-    match cfg.workers.unwrap_or(0) {
-        0 => tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build(),
-        n => tokio::runtime::Builder::new_multi_thread()
-            .enable_all()
-            .worker_threads(n)
-            .build(),
-    }
-    .unwrap()
-    .block_on(async move { run(sshcfg, listeners, logind_paths).await });
-}
-
-async fn run(
-    config: russh::server::Config,
-    listeners: Vec<std::net::TcpListener>,
-    logind_paths: Vec<Arc<PathBuf>>,
-) {
-    let (tx, _rx) = broadcast::channel(1);
-    let config = Arc::new(config);
-
-    proctitle::set_title("bbs-sshd: run");
-
-    let mut sigint = signal(SignalKind::interrupt()).unwrap();
-    let mut sigterm = signal(SignalKind::terminate()).unwrap();
-
-    let mut join_set = tokio::task::JoinSet::new();
-    for (idx, listener) in listeners.into_iter().enumerate() {
-        join_set.spawn(run_one_server(
-            config.clone(),
-            listener,
-            RoundRobin::new(logind_paths.clone(), idx),
-            tx.subscribe(),
-        ));
-    }
-
-    tokio::select! {
-        _ = sigint.recv() => (),
-        _ = sigterm.recv() => (),
-    }
-    info!("Signal caught, draining clients");
-    proctitle::set_title("bbs-sshd: drain");
-    drop(tx);
-
-    while join_set.join_next().await.is_some() {}
-    info!("bbs-sshd stopped");
-}
-
-async fn run_one_server(
-    config: Arc<russh::server::Config>,
-    listener: std::net::TcpListener,
-    mut logind_paths: RoundRobin<Arc<PathBuf>>,
-    mut stop: broadcast::Receiver<()>,
-) {
-    let listener = tokio::net::TcpListener::from_std(listener)
-        .expect("unable to convert TcpListener into tokio");
-    let lport = match listener
-        .local_addr()
-        .expect("unable to retrieve local address")
-    {
-        SocketAddr::V4(v4) => v4.port(),
-        SocketAddr::V6(v6) => v6.port(),
-    };
-
-    let mut join_set = tokio::task::JoinSet::new();
-    loop {
-        tokio::select! {
-            biased;
-            _ = stop.recv() => break,
-            accepted = listener.accept() => {
-                let (stream, client_addr) = accepted.expect("unable to accept connection");
-                join_set.spawn(run_forwarding(
-                    config.clone(),
-                    stream,
-                    handler::Handler::new(client_addr, lport, logind_paths.next().clone()),
-                ));
-            }
-        }
-    }
-    drop(listener);
-    while join_set.join_next().await.is_some() {}
-}
-
-async fn run_forwarding(
-    config: Arc<russh::server::Config>,
-    stream: tokio::net::TcpStream,
-    handler: handler::Handler,
-) -> Result<(), <handler::Handler as russh::server::Handler>::Error> {
-    let stream =
-        socket_linux::set_client_conn_options(stream).expect("unable to set socket options");
-
-    russh::server::run_stream(config, stream, handler)
-        .await?
-        .await
-}
-
-struct RoundRobin<T> {
-    items: Vec<T>,
-    offset: usize,
-}
-
-impl<T> RoundRobin<T> {
-    pub fn new(items: Vec<T>, offset: usize) -> Self {
-        let offset = offset % items.len();
-        Self { items, offset }
-    }
-
-    pub fn next(&mut self) -> &T {
-        let item = &self.items[self.offset];
-        self.offset += 1;
-        if self.offset == self.items.len() {
-            self.offset = 0;
-        }
-        item
-    }
+    daemon::build_runtime(cfg.daemon.workers).block_on(daemon::serve(
+        handler::DAEMON,
+        prepared.listeners,
+        prepared.logind_paths,
+        handler::Sshd::new(sshcfg),
+    ));
 }

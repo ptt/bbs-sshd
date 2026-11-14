@@ -40,6 +40,37 @@ pub trait Handler: Sized {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct WindowSize {
+    pub cols: u16,
+    pub rows: u16,
+}
+
+impl WindowSize {
+    /// The size a session starts at, before the client asks for one: what a
+    /// plain terminal is, so `logind` has a usable size to start with.
+    pub fn initial() -> Self {
+        WindowSize { cols: 80, rows: 24 }
+    }
+
+    /// Clamp a client supplied size to what telnet NAWS can carry.
+    pub fn new(cols: u32, rows: u32) -> Self {
+        use std::cmp;
+        WindowSize {
+            cols: cmp::min(cmp::max(cols, u16::MIN as u32), u16::MAX as u32) as u16,
+            rows: cmp::min(cmp::max(rows, u16::MIN as u32), u16::MAX as u32) as u16,
+        }
+    }
+
+    /// The payload of a NAWS subnegotiation.
+    pub fn naws_payload(&self) -> Vec<u8> {
+        let mut payload = Vec::with_capacity(4);
+        payload.extend_from_slice(&self.cols.to_be_bytes());
+        payload.extend_from_slice(&self.rows.to_be_bytes());
+        payload
+    }
+}
+
 pub enum Action {
     Data(Vec<u8>),
     Subnegotiate(u8, Vec<u8>),
@@ -115,7 +146,7 @@ async fn send_subnegotiate<S: AsyncWrite + Unpin>(
     stream.write_vectored(&iov).await
 }
 
-pub(crate) struct Telnet {
+pub struct Telnet {
     buf_size: usize,
     remote: Remote,
     receiver: Option<Receiver<Action>>,

@@ -1,0 +1,21 @@
+[package]
+name = "bbs-wsd"
+version = "0.3.0"
+edition = "2024"
+
+# WebSocket server that bridges web clients to `logind`.
+
+[dependencies]
+bbs-common = { path = "../bbs-common" }
+bytes = "1.12.1"
+futures = "0.3"
+tokio = {
+    version = "1.54.1",
+    features = ["rt", "net", "io-util", "sync", "time", "macros"],
+}
+tokio-tungstenite = "0.30"
+tungstenite = "0.30"
+log = { version = "0.4.34", features = ["serde", "release_max_level_trace"] }
+clap = { version = "4.6.7", features = ["cargo", "derive"] }
+serde = "1.0.229"
+serde_derive = "1.0.229"
