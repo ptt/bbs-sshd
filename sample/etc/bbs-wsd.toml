@@ -28,29 +28,37 @@ logind_paths = [
     "/home/bbs/run/logind.connfwd.sock",
 ]
 
-# Optional: WebSocket endpoint path. Clients ask for the "telnet" subprotocol,
-# which carries the raw telnet byte stream, or for no subprotocol; requests
-# offering only other subprotocols are answered 400. There are no query
-# parameters.
+# Optional: WebSocket endpoint path.
+#
+# Subprotocol of "telnet" is negotiated, or assumed if the subprotocol header
+# is not present.
 path = "/bbs"
 
-# Optional: Header that tells whether the session came in over TLS, so a login
-# is reported to logind as encrypted: `1` for a secure session, `0` for a plain
-# one. A request whose header is missing, or names neither `0` nor `1`, is
-# refused with 500, and the reason is logged. An empty string disables the
-# header, and every session is insecure then.
+# Optional: Header that tells whether the session came in a secured channel.
+# This secure bit is reported to `logind`. The header value must be
+# `0` (insecure) or `1` (secure). The header must be present and valid,
+# otherwise the request is rejected.
+#
+# An empty string disables the header, and every session is assumed insecure.
 # (default: "X-BBS-Secure")
 secure_header = "X-BBS-Secure"
 
 # Optional: Header that carries the client address as `ip:port` (an IPv6
-# address in brackets): the first value of the header that is an `ip:port` names
-# the client, and in a comma-separated list the first `ip:port` is the client. A
-# bare address with no port of its own names no client. Nothing else names the
-# client, so a connection whose header names no `ip:port` is refused with 500,
-# and the reason is logged.
+# address in brackets). There can be multiple values of this header, and the
+# first valid value is used. The header must be present and valid, otherwise
+# the request is rejected.
 #
 # An empty string disables the header, and clients are named by their TCP peer
-# address then. A unix socket connection has no peer address, so a `bind` entry
-# of a unix socket needs a header name here.
+# address then. A unix socket bind is not supported in this case.
 # (default: "X-BBS-Client-IP")
 ip_header = "X-BBS-Client-IP"
+
+# Optional: Header that carries the server local port the client connected to.
+# This port will be reported to `logind` as `lport`. The header must be present
+# and valid, otherwise the request is rejected. If there are multiple values,
+# the first valid value is used.
+#
+# An empty string disables the header, and the listening port is reported for a
+# TCP server; 0 is reported for an unix socket server.
+# (default: "X-BBS-Local-Port")
+lport_header = "X-BBS-Local-Port"

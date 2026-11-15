@@ -83,33 +83,51 @@ fn unix_listener(path: &Path) -> UnixListener {
     .expect("cannot serve the unix socket")
 }
 
-/// Settings with the default header names, so a request has to name the client
-/// address and whether the session came in over TLS.
+/// Settings with the default client address and secure header names, so a
+/// request has to name the client address and whether the session came in over
+/// TLS, and with the local port header disabled, so the port of the listener,
+/// 0 for a unix socket, is reported to logind.
 fn params(path: &str) -> Arc<ws::Params> {
-    params_with(path, Some("x-bbs-client-ip"), Some("x-bbs-secure"))
+    params_with(path, Some("x-bbs-client-ip"), Some("x-bbs-secure"), None)
 }
 
-/// Settings with both headers disabled, so a TCP peer address names the client
-/// and every session is insecure.
+/// Settings with all the headers disabled, so a TCP peer address names the
+/// client, every session is insecure, and the port of the listener is reported.
 fn params_plain(path: &str) -> Arc<ws::Params> {
-    params_with(path, None, None)
+    params_with(path, None, None, None)
 }
 
-/// Settings with the client address under `ip_header` and the secure header
-/// disabled.
+/// Settings with the client address under `ip_header`, the secure header
+/// disabled, and the local port header disabled.
 fn params_ip_only(path: &str, ip_header: &'static str) -> Arc<ws::Params> {
-    params_with(path, Some(ip_header), None)
+    params_with(path, Some(ip_header), None, None)
 }
 
+/// Settings with the default header names of a proxy front end, so a request
+/// has to name the client address, the TLS flag and the local port the client
+/// connected to.
+fn params_proxy(path: &str) -> Arc<ws::Params> {
+    params_with(
+        path,
+        Some("x-bbs-client-ip"),
+        Some("x-bbs-secure"),
+        Some("x-bbs-local-port"),
+    )
+}
+
+/// Settings with `path` and the three header names as given, where a `None`
+/// name disables that header.
 fn params_with(
     path: &str,
     ip_header: Option<&'static str>,
     secure_header: Option<&'static str>,
+    lport_header: Option<&'static str>,
 ) -> Arc<ws::Params> {
     Arc::new(ws::Params {
         path: Arc::from(path),
         ip_header: ip_header.map(HeaderName::from_static),
         secure_header: secure_header.map(HeaderName::from_static),
+        lport_header: lport_header.map(HeaderName::from_static),
     })
 }
 
@@ -560,7 +578,7 @@ async fn serves_a_tcp_client_by_its_peer_when_the_header_is_disabled() {
             peer,
             lport,
             Arc::new(sock),
-            params_with("/bbs", None, Some("x-bbs-secure")),
+            params_with("/bbs", None, Some("x-bbs-secure"), None),
         )
         .await;
         peer
@@ -832,6 +850,179 @@ async fn ignores_query_strings() {
 }
 
 #[tokio::test]
+async fn reports_the_local_port_of_the_header() {
+    let dir = temp_dir("lport");
+    let sock = dir.join("logind.sock");
+    let logind = tokio::spawn(fake_logind(sock.clone()));
+
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let lport = listener.local_addr().unwrap().port();
+    let server = tokio::spawn(async move {
+        let (stream, peer) = listener.accept().await.unwrap();
+        ws::serve_tcp(stream, peer, lport, Arc::new(sock), params_proxy("/bbs")).await;
+    });
+
+    // A proxy names the port the client connected to, and that goes to logind
+    // over the port bbs-wsd answers on, in a list the leftmost port is it.
+    let (mut ws, _) = connect_async(request(
+        &format!("ws://127.0.0.1:{lport}/bbs"),
+        &[
+            ("x-bbs-client-ip", "203.0.113.7:1234"),
+            ("x-bbs-secure", "1"),
+            ("x-bbs-local-port", "443, 80"),
+        ],
+    ))
+    .await
+    .unwrap();
+    ws.next().await.expect("no output").expect("read failed");
+    ws.send(Message::Close(None)).await.expect("cannot close");
+    drain(&mut ws).await;
+    server.await.unwrap();
+    let (header, _) = logind.await.expect("logind did not finish");
+    assert_eq!(&header[30..32], &443u16.to_le_bytes());
+
+    std::fs::remove_dir_all(&dir).expect("cannot remove the temp dir");
+}
+
+#[tokio::test]
+async fn reports_the_listener_port_of_a_disabled_local_port_header() {
+    let dir = temp_dir("lport-plain");
+    let sock = dir.join("logind.sock");
+    let logind = tokio::spawn(fake_logind(sock.clone()));
+
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let lport = listener.local_addr().unwrap().port();
+    let server = tokio::spawn(async move {
+        let (stream, peer) = listener.accept().await.unwrap();
+        ws::serve_tcp(stream, peer, lport, Arc::new(sock), params("/bbs")).await;
+    });
+
+    // The header is disabled, so the port of the TCP listener goes to logind,
+    // whatever the request sends, and nothing of the request is read for it.
+    let (mut ws, _) = connect_async(request(
+        &format!("ws://127.0.0.1:{lport}/bbs"),
+        &[
+            ("x-bbs-client-ip", "203.0.113.7:1234"),
+            ("x-bbs-secure", "0"),
+            ("x-bbs-local-port", "443"),
+        ],
+    ))
+    .await
+    .unwrap();
+    ws.next().await.expect("no output").expect("read failed");
+    ws.send(Message::Close(None)).await.expect("cannot close");
+    drain(&mut ws).await;
+    server.await.unwrap();
+    let (header, _) = logind.await.expect("logind did not finish");
+    assert_eq!(&header[30..32], &lport.to_le_bytes());
+
+    std::fs::remove_dir_all(&dir).expect("cannot remove the temp dir");
+}
+
+#[tokio::test]
+async fn reports_a_unix_session_without_a_local_port() {
+    let dir = temp_dir("lport-unix");
+    let sock = dir.join("logind.sock");
+    let logind = tokio::spawn(fake_logind(sock.clone()));
+
+    let path = dir.join("wsd.sock");
+    let listener = unix_listener(&path);
+    let server = tokio::spawn(async move {
+        let (stream, _peer) = listener.accept().await.unwrap();
+        ws::serve_unix(stream, Arc::new(sock), params("/bbs")).await;
+    });
+
+    // A unix listener has no port of its own to report once the header is
+    // disabled, so logind is told 0.
+    let conn = UnixStream::connect(&path).await.expect("cannot connect");
+    let (mut ws, _) = client_async(
+        request(
+            "ws://localhost/bbs",
+            &[
+                ("x-bbs-client-ip", "203.0.113.7:1234"),
+                ("x-bbs-secure", "0"),
+            ],
+        ),
+        conn,
+    )
+    .await
+    .unwrap();
+    ws.next().await.expect("no output").expect("read failed");
+    ws.send(Message::Close(None)).await.expect("cannot close");
+    drain(&mut ws).await;
+    server.await.unwrap();
+    let (header, _) = logind.await.expect("logind did not finish");
+    assert_eq!(&header[30..32], &0u16.to_le_bytes());
+
+    std::fs::remove_dir_all(&dir).expect("cannot remove the temp dir");
+}
+
+#[tokio::test]
+async fn rejects_a_client_that_names_no_local_port() {
+    let dir = temp_dir("lport-bad");
+    let sock = dir.join("logind.sock");
+    let _listener = UnixListener::bind(&sock).expect("cannot bind the logind socket");
+
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let lport = listener.local_addr().unwrap().port();
+    let server = tokio::spawn(async move {
+        for _ in 0..3 {
+            let (stream, peer) = listener.accept().await.unwrap();
+            ws::serve_tcp(
+                stream,
+                peer,
+                lport,
+                Arc::new(sock.clone()),
+                params_proxy("/bbs"),
+            )
+            .await;
+        }
+    });
+
+    // Every request has to name the local port the client connected to, so a
+    // proxy that sends no header, or no port in it, is a misconfiguration, and
+    // the session never starts.
+    let err = connect_async(request(
+        &format!("ws://127.0.0.1:{lport}/bbs"),
+        &[
+            ("x-bbs-client-ip", "203.0.113.7:1234"),
+            ("x-bbs-secure", "1"),
+        ],
+    ))
+    .await
+    .expect_err("a request has to name the local port");
+    assert_rejected(&err, 500, "x-bbs-local-port is missing");
+
+    let err = connect_async(request(
+        &format!("ws://127.0.0.1:{lport}/bbs"),
+        &[
+            ("x-bbs-client-ip", "203.0.113.7:1234"),
+            ("x-bbs-secure", "1"),
+            ("x-bbs-local-port", "https"),
+        ],
+    ))
+    .await
+    .expect_err("a local port header names no port");
+    assert_rejected(&err, 500, "x-bbs-local-port names no port");
+
+    let err = connect_async(request(
+        &format!("ws://127.0.0.1:{lport}/bbs"),
+        &[
+            ("x-bbs-client-ip", "203.0.113.7:1234"),
+            ("x-bbs-secure", "1"),
+            ("x-bbs-local-port", "65536"),
+        ],
+    ))
+    .await
+    .expect_err("a port number has to be a port");
+    assert_rejected(&err, 500, "x-bbs-local-port names no port");
+
+    server.await.unwrap();
+    drop(_listener);
+    std::fs::remove_dir_all(&dir).expect("cannot remove the temp dir");
+}
+
+#[tokio::test]
 async fn honours_the_configured_header() {
     let dir = temp_dir("headers");
     let sock = dir.join("logind.sock");
@@ -859,6 +1050,7 @@ async fn honours_the_configured_header() {
             ("x-forwarded-for", "203.0.113.7"),
             ("client-ip", "192.0.2.1:4321"),
             ("x-columns", "132"),
+            ("x-bbs-local-port", "443"),
         ],
     ))
     .await
@@ -870,6 +1062,9 @@ async fn honours_the_configured_header() {
     let (header, echoed) = logind.await.expect("logind did not finish");
     assert_eq!(&header[12..16], &[192, 0, 2, 1]);
     assert_eq!(&header[28..30], &4321u16.to_le_bytes());
+    // The local port header is disabled, so the port of the listener stands,
+    // and a port named under the name of the client address header goes unread.
+    assert_eq!(&header[30..32], &lport.to_le_bytes());
     // Nothing about the window size reaches logind, whatever the client sends.
     assert!(!has_naws(&echoed), "unexpected NAWS in {echoed:?}");
 

@@ -1,38 +1,6 @@
 //! WebSocket front-end: forwards each client connection to `logind`, passing
 //! the telnet byte stream between the two as it is, in WebSocket messages
 //! towards the client.
-//!
-//! # Client protocol
-//!
-//! * Each message carries a chunk of the raw telnet byte stream, passed
-//!   verbatim: a binary frame goes to `logind` as it is, and `logind` output
-//!   comes back as a binary frame as it is. Nothing is framed as telnet on
-//!   either side, so telnet commands and subnegotiations reach the client as
-//!   bytes.
-//! * Text frames are dropped: keystrokes arrive as binary frames, so text
-//!   carries nothing, including the old JSON control messages.
-//! * A close frame, or the connection going away, makes the `logind` side see
-//!   EOF.
-//! * The subprotocol is negotiated from `Sec-WebSocket-Protocol`. Only "telnet"
-//!   is supported. If request does not negotiate, telnet is assumed.
-//! * The client address reported to `logind` is the `ip:port` named by the
-//!   configured `ip_header` (default `X-BBS-Client-IP`): the first of its
-//!   values that is an address with a port behind it (an IPv6 address in
-//!   brackets), the first of a comma-separated list. Nothing else names the
-//!   client, so a request the header names no `ip:port` in is refused with 500
-//!   and logged, and so is a unix connection with `ip_header` set to an empty
-//!   string, which disables the header and leaves a unix peer with no address
-//!   of its own.
-//! * The client program named by `User-Agent` is reported to `logind` as
-//!   `client_code`, the CRC-32 of the name in front of the first `/`,
-//!   white-space or `(`, compatible with `wsproxy`; a client that sends no
-//!   `User-Agent` is 0.
-//! * A login is reported to `logind` as coming over a WebSocket
-//!   (`CONN_FLAG_WEBSOCKET`), plus `CONN_FLAG_SECURE` when the configured
-//!   `secure_header` (default `X-BBS-Secure`) says `1`, and alone when it says
-//!   `0`. The header disabled by an empty name leaves every session insecure,
-//!   and a request whose header is missing, or names neither `0` nor `1`, is
-//!   refused with 500.
 
 use crate::config::WsdConfig;
 use bbs_common::daemon::{Accept, UNIX_PREFIX};
@@ -99,6 +67,10 @@ pub struct Params {
     /// `0` for plain, or none when the config disables it with an empty name,
     /// which leaves every session insecure.
     pub secure_header: Option<HeaderName>,
+    /// Header carrying the local port the client connected to, or none when the
+    /// config disables it with an empty name, which reports the port of the
+    /// listener the connection came in on, and 0 for a unix socket.
+    pub lport_header: Option<HeaderName>,
 }
 
 impl Params {
@@ -112,6 +84,7 @@ impl Params {
             path: Arc::from(cfg.path.as_deref().unwrap_or(DEFAULT_PATH)),
             ip_header: header_name(&cfg.ip_header)?,
             secure_header: header_name(&cfg.secure_header)?,
+            lport_header: header_name(&cfg.lport_header)?,
         })
     }
 }
@@ -146,6 +119,8 @@ struct Handshake {
     /// none when the client asked for no subprotocol.
     protocol: Option<&'static str>,
     remote: SocketAddr,
+    /// The local port reported to `logind`.
+    lport: u16,
     /// How `logind` is told the session came in: over a WebSocket, and over
     /// TLS as well when the secure header said so.
     flags: u32,
@@ -157,9 +132,6 @@ struct Handshake {
 
 /// Serve one TCP WebSocket client until it goes away, forwarding it to
 /// `logind`.
-///
-/// The peer address is the client when the header names none, and the listener
-/// has the port to report to `logind`.
 pub async fn serve_tcp(
     stream: TcpStream,
     peer: SocketAddr,
@@ -185,9 +157,6 @@ pub async fn serve_tcp(
 
 /// Serve one unix WebSocket client until it goes away, forwarding it to
 /// `logind`.
-///
-/// A unix peer has no peer address of its own, and a unix listener no port, so
-/// the client is the address the header names and the port is reported as 0.
 pub async fn serve_unix(stream: UnixStream, logind_path: Arc<PathBuf>, params: Arc<Params>) {
     let result = forwarding(stream, None, 0, &logind_path, params).await;
     if let Err((e, handshake)) = result {
@@ -214,6 +183,9 @@ enum Error {
 /// Serve one client connection as a WebSocket session forwarded to `logind`,
 /// until it goes away.
 ///
+/// `lport` is the port of the listener the connection came in on. This will
+/// only be used if `lport_header` header is disabled.
+///
 /// On error, if the connection had made it pass the handshake phase, the
 /// `Handshake` is returned for diagnostics purposes.
 async fn forwarding<S>(
@@ -226,7 +198,7 @@ async fn forwarding<S>(
 where
     S: AsyncRead + AsyncWrite + Unpin + Send,
 {
-    let (ws, handshake) = match accept(&mut stream, peer, params).await {
+    let (ws, handshake) = match accept(&mut stream, peer, lport, params).await {
         Ok(upgraded) => upgraded,
         Err(e) => {
             stop_sending(&mut stream).await;
@@ -234,17 +206,18 @@ where
         }
     };
     info!(
-        "[client {}] Client: protocol {} encoding {} code {:08x} agent {:?}",
+        "[client {}] Client: protocol {} encoding {} lport {} code {:08x} agent {:?}",
         handshake.remote,
         handshake.protocol.unwrap_or(NO_SUBPROTOCOL),
         logind::encoding_name(handshake.encoding),
+        handshake.lport,
         handshake.client_code,
         handshake.agent,
     );
     let conn_data = logind::ConnData {
         addr: handshake.remote,
         encoding: handshake.encoding,
-        lport,
+        lport: handshake.lport,
         flags: handshake.flags,
         client_code: handshake.client_code,
     };
@@ -295,6 +268,7 @@ where
 async fn accept<S>(
     stream: &mut S,
     peer: Option<SocketAddr>,
+    lport: u16,
     params: Arc<Params>,
 ) -> Result<(WebSocketStream<&mut S>, Handshake), WsError>
 where
@@ -306,6 +280,7 @@ where
         WsCallback {
             out: &mut handshake,
             peer,
+            lport,
             params,
         },
         Some(ws_config()),
@@ -344,6 +319,9 @@ struct WsCallback<'a> {
     out: &'a mut Option<Handshake>,
     /// The address of the TCP peer, which a unix client has none of.
     peer: Option<SocketAddr>,
+    /// The port of the listener the connection came in on. This will only be used if
+    /// `lport_header` header is disabled.
+    lport: u16,
     params: Arc<Params>,
 }
 
@@ -353,7 +331,7 @@ impl Callback for WsCallback<'_> {
         request: &Request,
         response: Response,
     ) -> StdResult<Response, ErrorResponse> {
-        match handshake(request, self.peer, &self.params) {
+        match handshake(request, self.peer, self.lport, &self.params) {
             Ok(handshake) => {
                 // The subprotocol to echo back is known before the handshake is
                 // handed over to the session.
@@ -370,9 +348,14 @@ impl Callback for WsCallback<'_> {
 }
 
 /// Negotiate the session from the handshake request.
+///
+/// `lport` is the port of the listener the connection came in on, which
+/// `logind` is told when the `lport_header` is disabled; a request that names no
+/// port in the header is refused.
 fn handshake(
     req: &Request,
     peer: Option<SocketAddr>,
+    lport: u16,
     params: &Params,
 ) -> Result<Handshake, (StatusCode, String)> {
     if req.uri().path() != params.path.as_ref() {
@@ -394,6 +377,7 @@ fn handshake(
     };
 
     let remote = client_addr(req, params, peer).map_err(|(_, reason)| refused(peer, reason))?;
+    let lport = local_port(req, params, lport).map_err(|(_, reason)| refused(peer, reason))?;
     let secure = secure_flag(req, params).map_err(|(_, reason)| refused(peer, reason))?;
     let agent = agent(req);
     Ok(Handshake {
@@ -402,6 +386,7 @@ fn handshake(
         encoding: logind::ConnData::CONV_NORMAL,
         protocol,
         remote,
+        lport,
         flags: logind::ConnData::CONN_FLAG_WEBSOCKET
             | if secure {
                 logind::ConnData::CONN_FLAG_SECURE
@@ -502,6 +487,34 @@ fn header_values<K: AsHeaderName>(req: &Request, name: K) -> impl Iterator<Item 
         .iter()
         .filter_map(|value| value.to_str().ok())
         .flat_map(|value| value.split(',').map(str::trim))
+}
+
+/// The local port to report to `logind`, named by the configured
+/// `lport_header`: the first of its values that is a port number, the first of
+/// a comma-separated list, which a proxy sets to the port the client connected
+/// to. Nothing else names a port, so a request whose header names no port
+/// number is refused, as is one whose header names nothing at all.
+///
+/// The header disabled by an empty name reports the `listener` port instead,
+/// which a TCP listener has and a unix socket has none of, so a unix session is
+/// reported with port 0 then.
+fn local_port(req: &Request, params: &Params, listener: u16) -> Result<u16, (StatusCode, String)> {
+    // The config disabled the header, so the port of the listener is the port
+    // to report, and a unix socket has none of it.
+    let Some(header) = params.lport_header.as_ref() else {
+        return Ok(listener);
+    };
+    let name = header.as_str();
+    for value in header_values(req, header).filter(|value| !value.is_empty()) {
+        if let Ok(port) = value.parse::<u16>() {
+            return Ok(port);
+        }
+    }
+    Err(server_error(if header_value(req, header).is_some() {
+        format!("{name} names no port")
+    } else {
+        format!("{name} is missing")
+    }))
 }
 
 /// The client address to report to `logind`, named by the configured
@@ -654,7 +667,8 @@ impl Accept for Wsd {
 mod tests {
     use super::*;
     use crate::config::{
-        DEFAULT_IP_HEADER, DEFAULT_SECURE_HEADER, default_ip_header, default_secure_header,
+        DEFAULT_IP_HEADER, DEFAULT_LPORT_HEADER, DEFAULT_SECURE_HEADER, default_ip_header,
+        default_lport_header, default_secure_header,
     };
     use bbs_common::config::DaemonConfig;
 
@@ -664,16 +678,23 @@ mod tests {
             path: Some("/ws".to_string()),
             secure_header: default_secure_header(),
             ip_header: default_ip_header(),
+            lport_header: default_lport_header(),
         }
     }
 
     /// Settings of a config with `path`, `ip_header` and `secure_header` as
-    /// given.
+    /// given, under the default `lport_header`.
     fn settings(ip_header: &str, secure_header: &str) -> Params {
+        settings_with(ip_header, secure_header, DEFAULT_LPORT_HEADER)
+    }
+
+    /// Settings of a config with `path` and the three header names as given.
+    fn settings_with(ip_header: &str, secure_header: &str, lport_header: &str) -> Params {
         Params::new(&WsdConfig {
             path: Some("/bbs".to_string()),
             ip_header: ip_header.to_string(),
             secure_header: secure_header.to_string(),
+            lport_header: lport_header.to_string(),
             ..config()
         })
         .expect("usable config")
@@ -696,6 +717,10 @@ mod tests {
             params.secure_header,
             Some(HeaderName::from_static("x-bbs-secure"))
         );
+        assert_eq!(
+            params.lport_header,
+            Some(HeaderName::from_static("x-bbs-local-port"))
+        );
     }
 
     #[test]
@@ -714,6 +739,10 @@ mod tests {
                 HeaderName::from_str(DEFAULT_SECURE_HEADER).expect("the default is a header name")
             )
         );
+        assert_eq!(
+            params.lport_header,
+            Some(HeaderName::from_str(DEFAULT_LPORT_HEADER).expect("the default is a header name"))
+        );
     }
 
     #[test]
@@ -724,15 +753,22 @@ mod tests {
         cfg.ip_header = default_ip_header();
         cfg.secure_header = "Secure?".to_string();
         Params::new(&cfg).expect_err("a question mark is not a header name");
+        cfg.secure_header = default_secure_header();
+        cfg.lport_header = "Local Port".to_string();
+        Params::new(&cfg).expect_err("a space is not a header name");
+        cfg.lport_header = default_lport_header();
 
         // An empty name disables a header. The client address header, which a
         // TCP socket can do: its peer address names the client then. And the
-        // secure header, which leaves every session insecure.
+        // secure header, which leaves every session insecure. And the local
+        // port header, which reports the port of the listener.
         cfg.secure_header = String::new();
         cfg.ip_header = String::new();
+        cfg.lport_header = String::new();
         let params = Params::new(&cfg).expect("usable config");
         assert_eq!(params.ip_header, None);
         assert_eq!(params.secure_header, None);
+        assert_eq!(params.lport_header, None);
 
         // A unix peer has no address of its own to name the client by, so
         // there the client address header cannot be disabled, while a disabled
@@ -862,6 +898,64 @@ mod tests {
         assert_eq!(
             client_addr(&request(&[]), &params, None),
             refused(NO_IP_HEADER)
+        );
+    }
+
+    #[test]
+    fn local_ports_come_from_the_header() {
+        let params = settings(DEFAULT_IP_HEADER, DEFAULT_SECURE_HEADER);
+        let listener = 8081;
+        // The header names the port the client connected to, so a proxy that
+        // sends it has that port reported to `logind`, and every request has to
+        // send it. In a list the leftmost port is the local port, and a value
+        // that names none is passed over for the next value of the header.
+        for (headers, want) in [
+            (&[("x-bbs-local-port", "443")][..], Ok(443)),
+            (&[("x-bbs-local-port", " 443 ")][..], Ok(443)),
+            (&[("x-bbs-local-port", "0")][..], Ok(0)),
+            (&[("x-bbs-local-port", "65535")][..], Ok(65535)),
+            (&[("x-bbs-local-port", "80, 443")][..], Ok(80)),
+            (&[("x-bbs-local-port", "unknown, 443")][..], Ok(443)),
+            (&[("x-bbs-local-port", "443, 80")][..], Ok(443)),
+            (
+                &[("x-local-port", "443")][..],
+                refused("x-bbs-local-port is missing"),
+            ),
+            (&[][..], refused("x-bbs-local-port is missing")),
+            (
+                &[("x-bbs-local-port", "")][..],
+                refused("x-bbs-local-port is missing"),
+            ),
+            (
+                &[("x-bbs-local-port", "https")][..],
+                refused("x-bbs-local-port names no port"),
+            ),
+            (
+                &[("x-bbs-local-port", "65536")][..],
+                refused("x-bbs-local-port names no port"),
+            ),
+            (
+                &[("x-bbs-local-port", "-1")][..],
+                refused("x-bbs-local-port names no port"),
+            ),
+            (
+                &[("x-bbs-local-port", "443 80")][..],
+                refused("x-bbs-local-port names no port"),
+            ),
+        ] {
+            assert_eq!(
+                local_port(&request(headers), &params, listener),
+                want,
+                "{headers:?}"
+            );
+        }
+        // The header disabled reports the port of the listener, whatever the
+        // request sends, and nothing of the request is read for it.
+        let plain = settings_with(DEFAULT_IP_HEADER, DEFAULT_SECURE_HEADER, "");
+        assert_eq!(local_port(&request(&[]), &plain, listener), Ok(listener));
+        assert_eq!(
+            local_port(&request(&[("x-bbs-local-port", "443")]), &plain, listener),
+            Ok(listener)
         );
     }
 
