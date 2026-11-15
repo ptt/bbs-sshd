@@ -42,7 +42,6 @@ use bytes::Bytes;
 use futures::sink::SinkExt;
 use futures::stream::{SplitSink, SplitStream, StreamExt};
 use log::{debug, error, info, trace};
-use std::error::Error;
 use std::io;
 use std::net::SocketAddr;
 use std::path::Path;
@@ -51,9 +50,11 @@ use std::result::Result as StdResult;
 use std::str::FromStr;
 use std::sync::Arc;
 use std::time::Duration;
+use thiserror::Error;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::net::unix::{OwnedReadHalf, OwnedWriteHalf};
 use tokio::net::{TcpStream, UnixStream};
+use tokio_tungstenite::tungstenite::Error as WsError;
 use tokio_tungstenite::tungstenite::handshake::server::{
     Callback, ErrorResponse, Request, Response,
 };
@@ -128,7 +129,7 @@ fn header_name(name: &str) -> io::Result<Option<HeaderName>> {
 }
 
 /// A config setting that cannot be used.
-fn invalid(reason: impl Into<Box<dyn Error + Send + Sync>>) -> io::Error {
+fn invalid(reason: impl Into<Box<dyn std::error::Error + Send + Sync>>) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidInput, reason)
 }
 
@@ -188,13 +189,26 @@ pub async fn serve_unix(stream: UnixStream, logind_path: Arc<PathBuf>, params: A
     }
 }
 
+/// Why a forwarded session ended: which of the two sides of it broke, with the
+/// break of that side as it is, so the log of a session says what went away.
+#[derive(Error, Debug)]
+enum Error {
+    /// The WebSocket side broke: a handshake that did not go through, or a
+    /// frame of the client that could not be read.
+    #[error("websocket: {0}")]
+    Ws(#[from] WsError),
+    /// The `logind` side broke: its connection, or a message handed over it.
+    #[error("logind: {0}")]
+    Logind(#[from] io::Error),
+}
+
 async fn forwarding<S>(
     mut stream: S,
     peer: Option<SocketAddr>,
     lport: u16,
     logind_path: &Path,
     params: Arc<Params>,
-) -> Result<(), Box<dyn Error + Send + Sync>>
+) -> Result<(), Error>
 where
     S: AsyncRead + AsyncWrite + Unpin + Send,
 {
@@ -552,7 +566,7 @@ async fn logind_to_client<S: AsyncRead + AsyncWrite + Unpin>(
 async fn client_to_logind<S: AsyncRead + AsyncWrite + Unpin>(
     ws: &mut WsReader<'_, S>,
     logind: &mut OwnedWriteHalf,
-) -> Result<(), Box<dyn Error + Send + Sync>> {
+) -> Result<(), Error> {
     while let Some(msg) = ws.next().await {
         match msg? {
             Message::Binary(data) => logind.write_all(&data).await?,

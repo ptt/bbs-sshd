@@ -202,6 +202,7 @@ dependencies = [
  "log",
  "serde",
  "serde_derive",
+ "thiserror",
  "tokio",
  "tokio-tungstenite",
  "tungstenite",
