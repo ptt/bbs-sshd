@@ -72,6 +72,9 @@ const DEFAULT_PATH: &str = "/bbs";
 const PROTOCOL_TELNET: &str = "telnet";
 /// What a session the client asked for no subprotocol of is logged as.
 const NO_SUBPROTOCOL: &str = "none";
+/// What a session that went away before the handshake is logged as: no client
+/// address has been negotiated to name it by.
+const NO_HANDSHAKE: &str = "<early>";
 /// Why a unix connection with `ip_header` disabled has no client to report.
 pub const NO_IP_HEADER: &str = "ip_header is disabled and a unix peer has no address";
 
@@ -172,8 +175,11 @@ pub async fn serve_tcp(
         return;
     };
     let result = forwarding(stream, Some(peer), lport, &logind_path, params).await;
-    if let Err(e) = result {
-        info!("[client {peer}] WebSocket session ended: {e}");
+    if let Err((e, handshake)) = result {
+        info!(
+            "[client {}] WebSocket session ended: {e}",
+            session_name(handshake.as_ref())
+        );
     }
 }
 
@@ -184,8 +190,11 @@ pub async fn serve_tcp(
 /// the client is the address the header names and the port is reported as 0.
 pub async fn serve_unix(stream: UnixStream, logind_path: Arc<PathBuf>, params: Arc<Params>) {
     let result = forwarding(stream, None, 0, &logind_path, params).await;
-    if let Err(e) = result {
-        info!("[client {}] WebSocket session ended: {e}", peer_name(None));
+    if let Err((e, handshake)) = result {
+        info!(
+            "[client {}] WebSocket session ended: {e}",
+            session_name(handshake.as_ref())
+        );
     }
 }
 
@@ -202,74 +211,60 @@ enum Error {
     Logind(#[from] io::Error),
 }
 
+/// Serve one client connection as a WebSocket session forwarded to `logind`,
+/// until it goes away.
+///
+/// On error, if the connection had made it pass the handshake phase, the
+/// `Handshake` is returned for diagnostics purposes.
 async fn forwarding<S>(
     mut stream: S,
     peer: Option<SocketAddr>,
     lport: u16,
     logind_path: &Path,
     params: Arc<Params>,
-) -> Result<(), Error>
+) -> Result<(), (Error, Option<Handshake>)>
 where
     S: AsyncRead + AsyncWrite + Unpin + Send,
 {
-    let mut handshake: Option<Handshake> = None;
+    let (ws, handshake) = match accept(&mut stream, peer, params).await {
+        Ok(upgraded) => upgraded,
+        Err(e) => {
+            stop_sending(&mut stream).await;
+            return Err((e.into(), None));
+        }
+    };
+    info!(
+        "[client {}] Client: protocol {} encoding {} code {:08x} agent {:?}",
+        handshake.remote,
+        handshake.protocol.unwrap_or(NO_SUBPROTOCOL),
+        logind::encoding_name(handshake.encoding),
+        handshake.client_code,
+        handshake.agent,
+    );
+    let conn_data = logind::ConnData {
+        addr: handshake.remote,
+        encoding: handshake.encoding,
+        lport,
+        flags: handshake.flags,
+        client_code: handshake.client_code,
+    };
+
     // The session runs on halves that borrow the socket the client came in on,
-    // so it has a block of its own to end in: what the socket is left for here
-    // is stopping sending, once nothing of the session reads or writes it. A
-    // handshake that is rejected leaves its answer on the way to the client,
-    // and stopping sending is what lets the client read it.
-    let result = {
-        let ws = match accept_hdr_async_with_config(
-            &mut stream,
-            WsCallback {
-                out: &mut handshake,
-                peer,
-                params,
-            },
-            Some(ws_config()),
-        )
-        .await
-        {
-            Ok(ws) => ws,
-            Err(e) => {
-                stop_sending(&mut stream).await;
-                return Err(e.into());
-            }
-        };
-        let handshake = handshake.expect("the handshake callback always yields a handshake");
-        // What the client is, to tell programs apart later (logs only): the
-        // `User-Agent` it sent, which is what `client_code` names it by, and the
-        // subprotocol it settled on.
-        info!(
-            "[client {}] Client: protocol {} encoding {} code {:08x} agent {:?}",
-            handshake.remote,
-            handshake.protocol.unwrap_or(NO_SUBPROTOCOL),
-            logind::encoding_name(handshake.encoding),
-            handshake.client_code,
-            handshake.agent,
-        );
-
+    // so it has a block of its own to end in: once it is over, all the socket
+    // has left is stopping sending. The block is an `async` one, so a break of
+    // either side of the session ends the session in `result` instead of
+    // returning from this function.
+    let result: Result<(), Error> = async {
         let (sink, mut ws_reader) = ws.split();
-
-        let conn_data = logind::ConnData {
-            addr: handshake.remote,
-            encoding: handshake.encoding,
-            lport,
-            flags: handshake.flags,
-            client_code: handshake.client_code,
-        };
-        let conn = logind::connect(logind_path, &conn_data).await?;
-        let (logind_reader, mut logind_writer) = conn.into_split();
+        let (logind_reader, mut logind_writer) =
+            logind::connect(logind_path, &conn_data).await?.into_split();
         info!(
             "[client {}] Opened a WebSocket connection to logind {} (encoding {})",
             handshake.remote,
             logind_path.display(),
             logind::encoding_name(handshake.encoding)
         );
-        // Both directions pass bytes as they are: `logind` output goes out in a
-        // binary frame per read, and a client frame goes to `logind` as it is.
-        // Both run in this task, because the halves of the session borrow the
-        // socket and so have nothing of their own to move into a spawn.
+
         let to_client = logind_to_client(logind_reader, sink);
         let from_client = async {
             let result = client_to_logind(&mut ws_reader, &mut logind_writer).await;
@@ -281,11 +276,43 @@ where
         tokio::pin!(to_client, from_client);
         let (_to_client, result) = tokio::join!(to_client, from_client);
         result
-    };
+    }
+    .await;
     // Stop sending, so the client sees EOF and reads whatever of the session it
     // has not read yet.
     stop_sending(&mut stream).await;
-    result
+    // What the session got to, so the caller can tell the reason about the
+    // client the handshake had named.
+    result.map_err(|e| (e, Some(handshake)))
+}
+
+/// Upgrade the client socket to a WebSocket, negotiating the session in the
+/// handshake callback, and yield the socket to run the session on along with
+/// the session the handshake settled on.
+///
+/// A handshake that is refused leaves its answer on the way to the client, and
+/// a socket that breaks on the way to a handshake has nothing to hand over.
+async fn accept<S>(
+    stream: &mut S,
+    peer: Option<SocketAddr>,
+    params: Arc<Params>,
+) -> Result<(WebSocketStream<&mut S>, Handshake), WsError>
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
+    let mut handshake: Option<Handshake> = None;
+    let ws = accept_hdr_async_with_config(
+        stream,
+        WsCallback {
+            out: &mut handshake,
+            peer,
+            params,
+        },
+        Some(ws_config()),
+    )
+    .await?;
+    let handshake = handshake.expect("the handshake callback always yields a handshake");
+    Ok((ws, handshake))
 }
 
 /// Stop sending on the socket of a session, so the peer sees EOF and reads
@@ -395,6 +422,15 @@ fn refused(peer: Option<SocketAddr>, reason: String) -> (StatusCode, String) {
         peer_name(peer)
     );
     server_error(reason)
+}
+
+/// What to call a session in a log line: the client address the handshake
+/// settled on, and a session that went away before it settled on one has no
+/// client to name by.
+fn session_name(handshake: Option<&Handshake>) -> String {
+    handshake
+        .map(|handshake| handshake.remote.to_string())
+        .unwrap_or_else(|| NO_HANDSHAKE.to_string())
 }
 
 /// What to call a connection in a log line: the address of the TCP peer, or
