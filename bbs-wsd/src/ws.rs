@@ -34,14 +34,14 @@ use tokio_tungstenite::tungstenite::http::header::{
 use tokio_tungstenite::tungstenite::protocol::{Message, WebSocketConfig};
 use tokio_tungstenite::{WebSocketStream, accept_hdr_async_with_config};
 
-/// The WebSocket endpoint path requested by clients that we do not serve.
+/// The `path` used when the config sets none.
 const DEFAULT_PATH: &str = "/bbs";
 /// The subprotocol token asking for chunks of the raw telnet byte stream.
 const PROTOCOL_TELNET: &str = "telnet";
 /// What a session the client asked for no subprotocol of is logged as.
 const NO_SUBPROTOCOL: &str = "none";
-/// What a session that went away before the handshake is logged as: no client
-/// address has been negotiated to name it by.
+/// What to call a session that went away before the handshake, which has no
+/// client address yet.
 const NO_HANDSHAKE: &str = "<early>";
 /// Why a unix connection with `ip_header` disabled has no client to report.
 pub const NO_IP_HEADER: &str = "ip_header is disabled and a unix peer has no address";
@@ -59,24 +59,20 @@ type WsSink<'a, S> = SplitSink<WebSocketStream<&'a mut S>, Message>;
 #[derive(Clone, Debug)]
 pub struct Params {
     pub path: Arc<str>,
-    /// Header carrying the client address, or none when the config disables it
-    /// with an empty name, which leaves a TCP peer address to name the client
-    /// by.
+    /// Header carrying the client address, or none when the config disables it.
     pub ip_header: Option<HeaderName>,
-    /// Header carrying whether the session came in over TLS, `1` for secure and
-    /// `0` for plain, or none when the config disables it with an empty name,
-    /// which leaves every session insecure.
+    /// Header carrying `1` for a secure session and `0` for an insecure one,
+    /// or none when the config disables it.
     pub secure_header: Option<HeaderName>,
     /// Header carrying the local port the client connected to, or none when the
-    /// config disables it with an empty name, which reports the port of the
-    /// listener the connection came in on, and 0 for a unix socket.
+    /// config disables it.
     pub lport_header: Option<HeaderName>,
 }
 
 impl Params {
     pub fn new(cfg: &WsdConfig) -> io::Result<Self> {
-        // A unix peer has no address of its own to name the client by, so
-        // there the header cannot be disabled.
+        // A unix peer has no address of its own, so there the header cannot
+        // be disabled.
         if cfg.ip_header.is_empty() && cfg.daemon.bind.iter().any(|e| is_unix_bind(e)) {
             return Err(invalid("ip_header is required for a unix socket"));
         }
@@ -112,21 +108,19 @@ fn invalid(reason: impl Into<Box<dyn std::error::Error + Send + Sync>>) -> io::E
 /// Session parameters negotiated during the handshake.
 #[derive(Clone)]
 struct Handshake {
-    /// What `logind` is told to transcode as: the telnet byte stream goes
-    /// through as it is, so this is always the plain encoding.
+    /// The encoding to report to `logind`.
     encoding: u32,
     /// The subprotocol the client asked for and the handshake echoes back, or
     /// none when the client asked for no subprotocol.
     protocol: Option<&'static str>,
     remote: SocketAddr,
-    /// The local port reported to `logind`.
+    /// The local port to report to `logind`.
     lport: u16,
-    /// How `logind` is told the session came in: over a WebSocket, and over
-    /// TLS as well when the secure header said so.
+    /// The flags to report to `logind`.
     flags: u32,
     /// The `User-Agent` the client sent, empty if it sent none.
     agent: String,
-    /// What the client is, named by that `User-Agent` (see `logind::agent_code`).
+    /// The client code to report to `logind`.
     client_code: u32,
 }
 
@@ -139,9 +133,8 @@ pub async fn serve_tcp(
     logind_path: Arc<PathBuf>,
     params: Arc<Params>,
 ) {
-    // The socket options a client connection wants, which a unix socket has
-    // none of. A socket that refuses them is closed, and the client has to
-    // connect again.
+    // The socket options a client connection wants. A socket that refuses them
+    // is closed, and the client has to connect again.
     let Ok(stream) = socket_linux::set_client_conn_options(stream) else {
         error!("[client {peer}] Unable to set socket options, closing the connection");
         return;
@@ -183,9 +176,6 @@ enum Error {
 /// Serve one client connection as a WebSocket session forwarded to `logind`,
 /// until it goes away.
 ///
-/// `lport` is the port of the listener the connection came in on. This will
-/// only be used if `lport_header` header is disabled.
-///
 /// On error, if the connection had made it pass the handshake phase, the
 /// `Handshake` is returned for diagnostics purposes.
 async fn forwarding<S>(
@@ -223,10 +213,7 @@ where
     };
 
     // The session runs on halves that borrow the socket the client came in on,
-    // so it has a block of its own to end in: once it is over, all the socket
-    // has left is stopping sending. The block is an `async` one, so a break of
-    // either side of the session ends the session in `result` instead of
-    // returning from this function.
+    // so it ends in a block of its own.
     let result: Result<(), Error> = async {
         let (sink, mut ws_reader) = ws.split();
         let (logind_reader, mut logind_writer) =
@@ -254,17 +241,12 @@ where
     // Stop sending, so the client sees EOF and reads whatever of the session it
     // has not read yet.
     stop_sending(&mut stream).await;
-    // What the session got to, so the caller can tell the reason about the
-    // client the handshake had named.
     result.map_err(|e| (e, Some(handshake)))
 }
 
 /// Upgrade the client socket to a WebSocket, negotiating the session in the
 /// handshake callback, and yield the socket to run the session on along with
-/// the session the handshake settled on.
-///
-/// A handshake that is refused leaves its answer on the way to the client, and
-/// a socket that breaks on the way to a handshake has nothing to hand over.
+/// the handshake.
 async fn accept<S>(
     stream: &mut S,
     peer: Option<SocketAddr>,
@@ -293,10 +275,8 @@ where
 /// Stop sending on the socket of a session, so the peer sees EOF and reads
 /// whatever is already on its way to it.
 ///
-/// Closing a unix socket drops the frames the peer has not read, while a TCP
-/// connection lets them through, and a handshake rejection is one, so this is
-/// `shutdown(SHUT_WR)`, which tokio's `AsyncWriteExt::shutdown` is on both
-/// kinds of socket.
+/// This is `shutdown(SHUT_WR)`, which tokio has on both kinds of socket: a TCP
+/// connection lets the frames through and closing a unix socket drops them.
 async fn stop_sending<S: AsyncWrite + Unpin>(stream: &mut S) {
     let _ = stream.shutdown().await;
 }
@@ -306,10 +286,6 @@ const CLOSE_GRACE: Duration = Duration::from_secs(30);
 
 /// Read whatever the client sends once the session is over, until it closes its
 /// side of the connection.
-///
-/// Closing a unix socket drops the frames the client has not read, while a TCP
-/// connection lets them through, so the session has to stay open until the
-/// client has taken everything.
 async fn drain_client<S: AsyncRead + AsyncWrite + Unpin>(ws: &mut WsReader<'_, S>) {
     let _ = tokio::time::timeout(CLOSE_GRACE, async { while ws.next().await.is_some() {} }).await;
 }
@@ -319,8 +295,7 @@ struct WsCallback<'a> {
     out: &'a mut Option<Handshake>,
     /// The address of the TCP peer, which a unix client has none of.
     peer: Option<SocketAddr>,
-    /// The port of the listener the connection came in on. This will only be used if
-    /// `lport_header` header is disabled.
+    /// The port of the listener the connection came in on.
     lport: u16,
     params: Arc<Params>,
 }
@@ -347,11 +322,7 @@ impl Callback for WsCallback<'_> {
     }
 }
 
-/// Negotiate the session from the handshake request.
-///
-/// `lport` is the port of the listener the connection came in on, which
-/// `logind` is told when the `lport_header` is disabled; a request that names no
-/// port in the header is refused.
+/// Negotiates the session from the handshake request.
 fn handshake(
     req: &Request,
     peer: Option<SocketAddr>,
@@ -362,10 +333,8 @@ fn handshake(
         return Err((StatusCode::NOT_FOUND, "no such path".to_string()));
     }
 
-    // An offer of no subprotocol is served as it stands; `telnet` is the only
-    // token served, echoed back verbatim, so it is normalised to a 'static
-    // constant. Offers of nothing but other tokens are refused here, before the
-    // upgrade.
+    // `telnet` is the only token served, echoed back verbatim, so it is
+    // normalised to a 'static constant. Other offers are refused here.
     let protocol = match requested_protocol(req) {
         Ok(protocol) => protocol,
         Err(other) => {
@@ -398,9 +367,8 @@ fn handshake(
     })
 }
 
-/// A request that cannot be served is a misconfiguration, a proxy that sends
-/// no client address or says nothing about TLS, so the session never starts and
-/// the reason goes to the log, with the answer that goes to the client.
+/// Log the reason a request cannot be served, with the 500 answer that goes to
+/// the client.
 fn refused(peer: Option<SocketAddr>, reason: String) -> (StatusCode, String) {
     error!(
         "[client {}] {reason}: refusing the connection",
@@ -410,8 +378,7 @@ fn refused(peer: Option<SocketAddr>, reason: String) -> (StatusCode, String) {
 }
 
 /// What to call a session in a log line: the client address the handshake
-/// settled on, and a session that went away before it settled on one has no
-/// client to name by.
+/// settled on, and none before the handshake settles on one.
 fn session_name(handshake: Option<&Handshake>) -> String {
     handshake
         .map(|handshake| handshake.remote.to_string())
@@ -425,12 +392,9 @@ fn peer_name(peer: Option<SocketAddr>) -> String {
         .unwrap_or_else(|| "unix".to_string())
 }
 
-/// Whether the session came in over TLS, as the configured `secure_header`
-/// says: `1` is secure and `0` is plain. The header disabled by an empty name
-/// leaves every session insecure, and a request whose header is missing, or
-/// names neither `0` nor `1`, is refused.
+/// Computes the secure flag of a session from the `secure_header`.
 fn secure_flag(req: &Request, params: &Params) -> Result<bool, (StatusCode, String)> {
-    // The config disabled the header, so nothing is encrypted.
+    // The config disabled the header, so the session is insecure.
     let Some(header) = params.secure_header.as_ref() else {
         return Ok(false);
     };
@@ -438,7 +402,9 @@ fn secure_flag(req: &Request, params: &Params) -> Result<bool, (StatusCode, Stri
     match header_value(req, header) {
         Some("1") => Ok(true),
         Some("0") => Ok(false),
-        Some(other) => Err(server_error(format!("{name} names {other}, not 0 or 1"))),
+        Some(other) => Err(server_error(format!(
+            "{name} value {other} is neither 0 nor 1"
+        ))),
         None => Err(server_error(format!("{name} is missing"))),
     }
 }
@@ -450,13 +416,8 @@ fn agent(req: &Request) -> String {
         .to_string()
 }
 
-/// The subprotocol to serve, picked from the `Sec-WebSocket-Protocol` offers.
-///
-/// A client that offers no token, e.g. `new WebSocket(url)`, is served without
-/// a subprotocol being echoed back; so is a client whose offers are all empty.
-/// `telnet` is the only token served, and it is served wherever it appears
-/// among the offers. Offers of nothing but other tokens are refused, naming the
-/// first offer.
+/// The `telnet` token among the `Sec-WebSocket-Protocol` offers, and the first
+/// other offer as the refusal.
 fn requested_protocol(req: &Request) -> Result<Option<&'static str>, &str> {
     let mut offers = header_values(req, SEC_WEBSOCKET_PROTOCOL);
     let mut first = None;
@@ -475,9 +436,13 @@ fn requested_protocol(req: &Request) -> Result<Option<&'static str>, &str> {
     }
 }
 
-/// The first value of a header, if it is set and names something.
+/// Value of the first header of that name, taken as it is. An empty value is no
+/// value.
 fn header_value<'a>(req: &'a Request, name: &'a HeaderName) -> Option<&'a str> {
-    header_values(req, name).find(|value| !value.is_empty())
+    req.headers()
+        .get(name)
+        .and_then(|value| value.to_str().ok())
+        .filter(|value| !value.is_empty())
 }
 
 /// All values of a header, split on commas.
@@ -489,15 +454,7 @@ fn header_values<K: AsHeaderName>(req: &Request, name: K) -> impl Iterator<Item 
         .flat_map(|value| value.split(',').map(str::trim))
 }
 
-/// The local port to report to `logind`, named by the configured
-/// `lport_header`: the first of its values that is a port number, the first of
-/// a comma-separated list, which a proxy sets to the port the client connected
-/// to. Nothing else names a port, so a request whose header names no port
-/// number is refused, as is one whose header names nothing at all.
-///
-/// The header disabled by an empty name reports the `listener` port instead,
-/// which a TCP listener has and a unix socket has none of, so a unix session is
-/// reported with port 0 then.
+/// Computes the local port to report to `logind` from the `lport_header`.
 fn local_port(req: &Request, params: &Params, listener: u16) -> Result<u16, (StatusCode, String)> {
     // The config disabled the header, so the port of the listener is the port
     // to report, and a unix socket has none of it.
@@ -505,31 +462,23 @@ fn local_port(req: &Request, params: &Params, listener: u16) -> Result<u16, (Sta
         return Ok(listener);
     };
     let name = header.as_str();
-    for value in header_values(req, header).filter(|value| !value.is_empty()) {
-        if let Ok(port) = value.parse::<u16>() {
-            return Ok(port);
-        }
+    match header_value(req, header) {
+        // A port number is the whole value.
+        Some(value) => value
+            .parse::<u16>()
+            .map_err(|_| server_error(format!("{name} value contains no port"))),
+        None => Err(server_error(format!("{name} is missing"))),
     }
-    Err(server_error(if header_value(req, header).is_some() {
-        format!("{name} names no port")
-    } else {
-        format!("{name} is missing")
-    }))
 }
 
-/// The client address to report to `logind`, named by the configured
-/// `ip_header`: the first of its values that is an `ip:port` (an IPv6 address
-/// in brackets), the first of a comma-separated list. Nothing else names the
-/// client, so a request whose header names no `ip:port` is refused, as is one
-/// whose header names nothing at all; a unix client with the header disabled
-/// has no peer address of its own, so it is refused too.
+/// Computes the client address to report to `logind` from the `ip_header`.
 fn client_addr(
     req: &Request,
     params: &Params,
     peer: Option<SocketAddr>,
 ) -> Result<SocketAddr, (StatusCode, String)> {
-    // The config disabled the header, so a TCP peer names its own client, and
-    // a unix client has no address of its own.
+    // The config disabled the header, so the TCP peer address is the client,
+    // and a unix client has no address of its own.
     let Some(header) = params.ip_header.as_ref() else {
         return match peer {
             Some(peer) => Ok(peer),
@@ -537,18 +486,12 @@ fn client_addr(
         };
     };
     let name = header.as_str();
-    // A client address is an address with a port of its own behind it, so a
-    // bare address, and anything else of no use, names no client.
-    for value in header_values(req, header).filter(|value| !value.is_empty()) {
-        if let Ok(addr) = SocketAddr::from_str(value) {
-            return Ok(addr);
-        }
+    // A client address is `ip:port`, so a bare address is none.
+    match header_value(req, header) {
+        Some(value) => SocketAddr::from_str(value)
+            .map_err(|_| server_error(format!("{name} value contains no ip:port"))),
+        None => Err(server_error(format!("{name} is missing"))),
     }
-    Err(server_error(if header_value(req, header).is_some() {
-        format!("{name} names no ip:port")
-    } else {
-        format!("{name} is missing")
-    }))
 }
 
 /// A request that cannot be served, with what to tell the client about it.
@@ -682,13 +625,13 @@ mod tests {
         }
     }
 
-    /// Settings of a config with `path`, `ip_header` and `secure_header` as
-    /// given, under the default `lport_header`.
+    /// Settings of a config with `ip_header` and `secure_header` as given,
+    /// under the default `lport_header`.
     fn settings(ip_header: &str, secure_header: &str) -> Params {
         settings_with(ip_header, secure_header, DEFAULT_LPORT_HEADER)
     }
 
-    /// Settings of a config with `path` and the three header names as given.
+    /// Settings of a config with the three header names as given.
     fn settings_with(ip_header: &str, secure_header: &str, lport_header: &str) -> Params {
         Params::new(&WsdConfig {
             path: Some("/bbs".to_string()),
@@ -758,10 +701,7 @@ mod tests {
         Params::new(&cfg).expect_err("a space is not a header name");
         cfg.lport_header = default_lport_header();
 
-        // An empty name disables a header. The client address header, which a
-        // TCP socket can do: its peer address names the client then. And the
-        // secure header, which leaves every session insecure. And the local
-        // port header, which reports the port of the listener.
+        // An empty name disables a header, which a TCP socket can do.
         cfg.secure_header = String::new();
         cfg.ip_header = String::new();
         cfg.lport_header = String::new();
@@ -770,13 +710,13 @@ mod tests {
         assert_eq!(params.secure_header, None);
         assert_eq!(params.lport_header, None);
 
-        // A unix peer has no address of its own to name the client by, so
-        // there the client address header cannot be disabled, while a disabled
-        // secure header serves it.
+        // A unix peer has no address of its own, so the client address header
+        // cannot be disabled there, and a disabled secure header serves it.
         cfg.daemon.bind = vec!["unix:/run/bbs/wsd.sock".to_string()];
-        Params::new(&cfg).expect_err("a unix socket cannot do with a disabled address header");
+        Params::new(&cfg)
+            .expect_err("a unix socket server cannot do with a disabled address header");
         cfg.ip_header = default_ip_header();
-        Params::new(&cfg).expect("a unix socket with a disabled secure header");
+        Params::new(&cfg).expect("a unix socket server with a disabled secure header");
     }
 
     /// A handshake request with the given extra headers.
@@ -789,15 +729,12 @@ mod tests {
     }
 
     #[test]
-    fn client_addresses_come_from_the_header() {
+    fn client_addresses_are_taken_from_the_header() {
         let params = settings(DEFAULT_IP_HEADER, DEFAULT_SECURE_HEADER);
         let peer = SocketAddr::from(([127, 0, 0, 1], 8081));
         let client = |addr: &str| addr.parse::<SocketAddr>().expect("an ip:port");
-        // The header of the config names the client and nothing else does, so
-        // a request it names no client in is refused, over a TCP connection as
-        // well as over a unix socket. A client address is an `ip:port`, so a
-        // bare address names no client, and so does a value that is no address
-        // at all.
+        // The client address is taken from the configured header alone, and a
+        // value of no `ip:port` is refused.
         for (headers, peer, want) in [
             (
                 &[("x-bbs-client-ip", "203.0.113.7:4321")][..],
@@ -817,38 +754,45 @@ mod tests {
             (
                 &[("x-bbs-client-ip", "203.0.113.7")][..],
                 Some(peer),
-                refused("x-bbs-client-ip names no ip:port"),
+                refused("x-bbs-client-ip value contains no ip:port"),
             ),
             (
                 &[("x-bbs-client-ip", "203.0.113.7")][..],
                 None,
-                refused("x-bbs-client-ip names no ip:port"),
+                refused("x-bbs-client-ip value contains no ip:port"),
             ),
             (
                 &[("x-bbs-client-ip", "2001:db8::1")][..],
                 Some(peer),
-                refused("x-bbs-client-ip names no ip:port"),
+                refused("x-bbs-client-ip value contains no ip:port"),
             ),
-            // In a chain the leftmost `ip:port` is the client, and a value that
-            // names none is passed over for the next value of the header.
+            // A value is taken as it is, so a list of addresses is none.
             (
                 &[("x-bbs-client-ip", "203.0.113.7:4321, 192.0.2.1")][..],
                 None,
-                Ok(client("203.0.113.7:4321")),
+                refused("x-bbs-client-ip value contains no ip:port"),
             ),
             (
-                &[("x-bbs-client-ip", "unknown, 192.0.2.1:4321")][..],
+                &[("x-bbs-client-ip", " 203.0.113.7:4321")][..],
                 Some(peer),
-                Ok(client("192.0.2.1:4321")),
+                refused("x-bbs-client-ip value contains no ip:port"),
             ),
             (
                 &[("x-bbs-client-ip", "203.0.113.7, 192.0.2.1")][..],
                 Some(peer),
-                refused("x-bbs-client-ip names no ip:port"),
+                refused("x-bbs-client-ip value contains no ip:port"),
             ),
-            // A header that is not the configured one names no client, and so
-            // does the peer address of a TCP connection. A header that names
-            // nothing at all is as good as one that is not there.
+            // Of several headers of the name the first one is read.
+            (
+                &[
+                    ("x-bbs-client-ip", "203.0.113.7:4321"),
+                    ("x-bbs-client-ip", "192.0.2.1:4321"),
+                ][..],
+                Some(peer),
+                Ok(client("203.0.113.7:4321")),
+            ),
+            // Only the configured header is read, and a header of an empty
+            // value is as good as one that is not there.
             (
                 &[("x-real-ip", "203.0.113.7")][..],
                 Some(peer),
@@ -864,12 +808,12 @@ mod tests {
             (
                 &[("x-bbs-client-ip", "unknown")][..],
                 Some(peer),
-                refused("x-bbs-client-ip names no ip:port"),
+                refused("x-bbs-client-ip value contains no ip:port"),
             ),
             (
                 &[("x-bbs-client-ip", "unknown")][..],
                 None,
-                refused("x-bbs-client-ip names no ip:port"),
+                refused("x-bbs-client-ip value contains no ip:port"),
             ),
         ] {
             assert_eq!(
@@ -882,11 +826,11 @@ mod tests {
     }
 
     #[test]
-    fn a_disabled_header_leaves_the_tcp_peer_to_name_the_client() {
+    fn a_disabled_header_leaves_the_tcp_peer_address_as_the_client() {
         let params = settings("", DEFAULT_SECURE_HEADER);
         let peer = SocketAddr::from(([127, 0, 0, 1], 8081));
-        // The header is disabled, so no header names a client: a TCP peer
-        // names its own client, and a unix client has no address of its own.
+        // The header is disabled, so no header is read for a client: a TCP peer
+        // address is the client, and a unix client has no address of its own.
         assert_eq!(
             client_addr(
                 &request(&[("x-bbs-client-ip", "203.0.113.7:4321")]),
@@ -905,18 +849,28 @@ mod tests {
     fn local_ports_come_from_the_header() {
         let params = settings(DEFAULT_IP_HEADER, DEFAULT_SECURE_HEADER);
         let listener = 8081;
-        // The header names the port the client connected to, so a proxy that
-        // sends it has that port reported to `logind`, and every request has to
-        // send it. In a list the leftmost port is the local port, and a value
-        // that names none is passed over for the next value of the header.
+        // The header carries the port the client connected to and every
+        // request has to send one, taken as it is.
         for (headers, want) in [
             (&[("x-bbs-local-port", "443")][..], Ok(443)),
-            (&[("x-bbs-local-port", " 443 ")][..], Ok(443)),
             (&[("x-bbs-local-port", "0")][..], Ok(0)),
             (&[("x-bbs-local-port", "65535")][..], Ok(65535)),
-            (&[("x-bbs-local-port", "80, 443")][..], Ok(80)),
-            (&[("x-bbs-local-port", "unknown, 443")][..], Ok(443)),
-            (&[("x-bbs-local-port", "443, 80")][..], Ok(443)),
+            (
+                &[("x-bbs-local-port", " 443 ")][..],
+                refused("x-bbs-local-port value contains no port"),
+            ),
+            (
+                &[("x-bbs-local-port", "80, 443")][..],
+                refused("x-bbs-local-port value contains no port"),
+            ),
+            (
+                &[("x-bbs-local-port", "443, 80")][..],
+                refused("x-bbs-local-port value contains no port"),
+            ),
+            (
+                &[("x-bbs-local-port", "443"), ("x-bbs-local-port", "80")][..],
+                Ok(443),
+            ),
             (
                 &[("x-local-port", "443")][..],
                 refused("x-bbs-local-port is missing"),
@@ -928,19 +882,19 @@ mod tests {
             ),
             (
                 &[("x-bbs-local-port", "https")][..],
-                refused("x-bbs-local-port names no port"),
+                refused("x-bbs-local-port value contains no port"),
             ),
             (
                 &[("x-bbs-local-port", "65536")][..],
-                refused("x-bbs-local-port names no port"),
+                refused("x-bbs-local-port value contains no port"),
             ),
             (
                 &[("x-bbs-local-port", "-1")][..],
-                refused("x-bbs-local-port names no port"),
+                refused("x-bbs-local-port value contains no port"),
             ),
             (
                 &[("x-bbs-local-port", "443 80")][..],
-                refused("x-bbs-local-port names no port"),
+                refused("x-bbs-local-port value contains no port"),
             ),
         ] {
             assert_eq!(
@@ -950,11 +904,15 @@ mod tests {
             );
         }
         // The header disabled reports the port of the listener, whatever the
-        // request sends, and nothing of the request is read for it.
-        let plain = settings_with(DEFAULT_IP_HEADER, DEFAULT_SECURE_HEADER, "");
-        assert_eq!(local_port(&request(&[]), &plain, listener), Ok(listener));
+        // request sends.
+        let disabled = settings_with(DEFAULT_IP_HEADER, DEFAULT_SECURE_HEADER, "");
+        assert_eq!(local_port(&request(&[]), &disabled, listener), Ok(listener));
         assert_eq!(
-            local_port(&request(&[("x-bbs-local-port", "443")]), &plain, listener),
+            local_port(
+                &request(&[("x-bbs-local-port", "443")]),
+                &disabled,
+                listener
+            ),
             Ok(listener)
         );
     }
@@ -962,20 +920,30 @@ mod tests {
     #[test]
     fn security_comes_from_the_secure_header() {
         let params = settings(DEFAULT_IP_HEADER, DEFAULT_SECURE_HEADER);
-        // `1` is a session over TLS and `0` is a plain one, and a request that
-        // names neither, in a header that is there at all, is refused.
+        // The value has to be `1` for a secure session and `0` for an insecure
+        // one, taken as it is, and a value of neither is refused.
         for (headers, want) in [
             (&[("x-bbs-secure", "1")][..], Ok(true)),
             (&[("x-bbs-secure", "0")][..], Ok(false)),
-            (&[("x-bbs-secure", " 1 ")][..], Ok(true)),
-            (&[("x-bbs-secure", "1, 0")][..], Ok(true)),
+            (
+                &[("x-bbs-secure", " 1 ")][..],
+                refused("x-bbs-secure value  1  is neither 0 nor 1"),
+            ),
+            (
+                &[("x-bbs-secure", "1, 0")][..],
+                refused("x-bbs-secure value 1, 0 is neither 0 nor 1"),
+            ),
+            (
+                &[("x-bbs-secure", "1"), ("x-bbs-secure", "0")][..],
+                Ok(true),
+            ),
             (
                 &[("x-bbs-secure", "yes")][..],
-                refused("x-bbs-secure names yes, not 0 or 1"),
+                refused("x-bbs-secure value yes is neither 0 nor 1"),
             ),
             (
                 &[("x-bbs-secure", "2")][..],
-                refused("x-bbs-secure names 2, not 0 or 1"),
+                refused("x-bbs-secure value 2 is neither 0 nor 1"),
             ),
             (
                 &[("x-bbs-secure", "")][..],
@@ -987,21 +955,19 @@ mod tests {
             assert_eq!(secure_flag(&request(headers), &params), want, "{headers:?}");
         }
         // The header disabled leaves every session insecure, whatever the
-        // request sends, and nothing of the request is read for it.
-        let plain = settings(DEFAULT_IP_HEADER, "");
-        assert_eq!(secure_flag(&request(&[]), &plain), Ok(false));
+        // request sends.
+        let disabled = settings(DEFAULT_IP_HEADER, "");
+        assert_eq!(secure_flag(&request(&[]), &disabled), Ok(false));
         assert_eq!(
-            secure_flag(&request(&[("x-bbs-secure", "yes")]), &plain),
+            secure_flag(&request(&[("x-bbs-secure", "yes")]), &disabled),
             Ok(false)
         );
     }
 
     #[test]
     fn negotiates_the_subprotocol() {
-        // No offer at all, or offers of nothing, mean no subprotocol to echo
-        // back. `telnet` is served from anywhere among the offers, in as many
-        // headers as the client spread them over. Offers of nothing but other
-        // tokens are refused, naming the first offer.
+        // No offer, and offers of nothing, mean no subprotocol to echo back.
+        // `telnet` is served from anywhere among the offers.
         for (offers, want) in [
             (&[][..], Ok(None)),
             (&[("sec-websocket-protocol", "")][..], Ok(None)),
