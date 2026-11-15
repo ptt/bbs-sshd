@@ -474,7 +474,7 @@ impl Accept for Sshd {
         };
         let handler = Handler::new(peer, lport, logind_path);
         if let Err(e) = run_forwarding(self.config, stream, handler).await {
-            error!("[client {peer}] SSH session ended: {e}");
+            debug!("[client {peer}] SSH session ended: {e}");
         }
     }
 }

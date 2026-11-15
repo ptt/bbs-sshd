@@ -176,7 +176,7 @@ pub async fn serve_tcp(
     };
     let result = forwarding(stream, Some(peer), lport, &logind_path, params).await;
     if let Err((e, handshake)) = result {
-        info!(
+        debug!(
             "[client {}] WebSocket session ended: {e}",
             session_name(handshake.as_ref())
         );
@@ -191,7 +191,7 @@ pub async fn serve_tcp(
 pub async fn serve_unix(stream: UnixStream, logind_path: Arc<PathBuf>, params: Arc<Params>) {
     let result = forwarding(stream, None, 0, &logind_path, params).await;
     if let Err((e, handshake)) = result {
-        info!(
+        debug!(
             "[client {}] WebSocket session ended: {e}",
             session_name(handshake.as_ref())
         );
