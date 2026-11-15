@@ -121,7 +121,7 @@ struct Handshake {
     /// The `User-Agent` the client sent, empty if it sent none.
     agent: String,
     /// The client code to report to `logind`.
-    client_code: u32,
+    client_code: logind::ClientCode,
 }
 
 /// Serve one TCP WebSocket client until it goes away, forwarding it to
@@ -201,7 +201,7 @@ where
         handshake.protocol.unwrap_or(NO_SUBPROTOCOL),
         logind::encoding_name(handshake.encoding),
         handshake.lport,
-        handshake.client_code,
+        handshake.client_code.0,
         handshake.agent,
     );
     let conn_data = logind::ConnData {
@@ -362,7 +362,7 @@ fn handshake(
             } else {
                 0
             },
-        client_code: logind::agent_code(&agent),
+        client_code: logind::ClientCode::websocket(&agent),
         agent,
     })
 }

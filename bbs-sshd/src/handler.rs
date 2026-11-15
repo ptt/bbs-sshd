@@ -122,11 +122,12 @@ impl Handler {
         // What the client is, to tell programs apart later (logs only): its
         // SSH identification string (e.g. "SSH-2.0-PuTTY_Release_0.81"), the
         // terminal type and size it asked for, and the user (encoding).
+        let client_code = logind::ClientCode::ssh(session.remote_sshid());
         info!(
             "[client {}] Client: id {:?} code {:08x} term {:?} size {}x{} user {}",
             self.addr,
             String::from_utf8_lossy(session.remote_sshid()),
-            logind::client_code(session.remote_sshid()),
+            client_code.0,
             self.term,
             self.window_size.cols,
             self.window_size.rows,
@@ -138,7 +139,7 @@ impl Handler {
             encoding: self.encoding,
             lport: self.lport,
             flags: logind::ConnData::CONN_FLAG_SECURE | logind::ConnData::CONN_FLAG_SSH,
-            client_code: logind::client_code(session.remote_sshid()),
+            client_code,
         };
 
         let conn = logind::connect(&self.logind_path, &conn_data).await?;

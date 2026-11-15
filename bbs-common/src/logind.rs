@@ -4,14 +4,61 @@ use std::net::SocketAddr;
 use std::path::Path;
 use tokio::net::UnixStream;
 
+/// The client code (defined in pttbbs include/daemons.h).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ClientCode(pub u32);
+
+impl ClientCode {
+    /// The client code of an SSH connection, from the SSH identification string in
+    /// `sshid`.
+    pub fn ssh(sshid: &[u8]) -> Self {
+        Self::program_name(sshid).map_or(Self(0), |name| Self(crc32(name)))
+    }
+
+    /// The client code of a WebSocket connection, from the `User-Agent` value in
+    /// `user_agent`.
+    pub fn websocket(user_agent: &str) -> Self {
+        Self::agent_program(user_agent).map_or(Self(0), |name| Self(crc32(name)))
+    }
+
+    /// The program name of an SSH identification string ("SSH-2.0-" then the
+    /// software version, up to the first "_", "-" or space, at most 32 bytes),
+    /// e.g. "PuTTY" of "SSH-2.0-PuTTY_Release_0.70", "BePTT" of
+    /// "SSH-2.0-BePTT_Android_7.2.9.1070209002". None if there is none.
+    fn program_name(sshid: &[u8]) -> Option<&[u8]> {
+        let rest = sshid.strip_prefix(b"SSH-")?;
+        let rest = &rest[rest.iter().position(|&c| c == b'-')? + 1..];
+        let end = rest
+            .iter()
+            .position(|&c| matches!(c, b'_' | b'-' | b' ' | b'\t' | b'\r' | b'\n'))
+            .unwrap_or(rest.len());
+        let name = &rest[..end.min(32)];
+        (!name.is_empty()).then_some(name)
+    }
+
+    /// The program name of a `User-Agent` value, which is what `wsproxy` names
+    /// a web client by: what comes before the first `/` (which separates a name
+    /// from its version), white-space, or `(` (which starts a platform note),
+    /// e.g. "Mozilla" of "Mozilla/5.0 (Windows NT 10.0; Win64; x64)", at most
+    /// 32 bytes. A value that is only a name is taken whole. None if there is
+    /// no name.
+    fn agent_program(user_agent: &str) -> Option<&[u8]> {
+        let ua = user_agent.trim_start();
+        let end = ua
+            .find(|c: char| c == '/' || c.is_whitespace() || c == '(')
+            .unwrap_or(ua.len());
+        let bytes = &ua.as_bytes()[..end];
+        let name = &bytes[..bytes.len().min(32)];
+        (!name.is_empty()).then_some(name)
+    }
+}
+
 pub struct ConnData {
     pub addr: SocketAddr,
     pub encoding: u32,
     pub lport: u16,
     pub flags: u32,
-    /// The client (client_code in pttbbs include/daemons.h): client_code()
-    /// of the SSH identification string, 0 if none.
-    pub client_code: u32,
+    pub client_code: ClientCode,
 }
 
 impl ConnData {
@@ -57,7 +104,7 @@ impl ConnData {
         conn_data.put_u16_le(self.addr.port());
         conn_data.put_u16_le(self.lport);
         conn_data.put_u32_le(self.flags);
-        conn_data.put_u32_le(self.client_code);
+        conn_data.put_u32_le(self.client_code.0);
         assert_eq!(40, conn_data.len());
         Some(conn_data.to_vec())
     }
@@ -93,49 +140,6 @@ pub fn encoding_name(encoding: u32) -> &'static str {
         ConnData::CONV_UTF8 => "utf8",
         _ => "unknown",
     }
-}
-
-/// The program name of an SSH identification string ("SSH-2.0-" then the
-/// software version, up to the first "_", "-" or space, at most 32 bytes),
-/// e.g. "PuTTY" of "SSH-2.0-PuTTY_Release_0.70", "BePTT" of
-/// "SSH-2.0-BePTT_Android_7.2.9.1070209002". None if there is none.
-pub fn program_name(sshid: &[u8]) -> Option<&[u8]> {
-    let rest = sshid.strip_prefix(b"SSH-")?;
-    let rest = &rest[rest.iter().position(|&c| c == b'-')? + 1..];
-    let end = rest
-        .iter()
-        .position(|&c| matches!(c, b'_' | b'-' | b' ' | b'\t' | b'\r' | b'\n'))
-        .unwrap_or(rest.len());
-    let name = &rest[..end.min(32)];
-    (!name.is_empty()).then_some(name)
-}
-
-/// The client code logind takes for an SSH connection: CRC-32 (IEEE, as
-/// wsproxy computes for the program name of a User-Agent) of the program name
-/// of the SSH identification string, 0 if none.
-pub fn client_code(sshid: &[u8]) -> u32 {
-    program_name(sshid).map_or(0, crc32)
-}
-
-/// The program name of a `User-Agent` value, which is what `wsproxy` names a
-/// web client by: what comes before the first `/` (which separates a name from
-/// its version), white-space, or `(` (which starts a platform note), e.g.
-/// "Mozilla" of "Mozilla/5.0 (Windows NT 10.0; Win64; x64)", at most 32 bytes.
-/// A value that is only a name is taken whole. None if there is no name.
-pub fn agent_program(user_agent: &str) -> Option<&[u8]> {
-    let ua = user_agent.trim_start();
-    let end = ua
-        .find(|c: char| c == '/' || c.is_whitespace() || c == '(')
-        .unwrap_or(ua.len());
-    let bytes = &ua.as_bytes()[..end];
-    let name = &bytes[..bytes.len().min(32)];
-    (!name.is_empty()).then_some(name)
-}
-
-/// The client code logind takes for a web connection: the CRC-32 of the
-/// program name of a `User-Agent` value, 0 if there is no name.
-pub fn agent_code(user_agent: &str) -> u32 {
-    agent_program(user_agent).map_or(0, crc32)
 }
 
 fn crc32(data: &[u8]) -> u32 {
@@ -185,7 +189,7 @@ mod tests {
             encoding: ConnData::CONV_UTF8,
             lport: 2023,
             flags: ConnData::CONN_FLAG_SECURE | ConnData::CONN_FLAG_SSH,
-            client_code: 0x1122_3344,
+            client_code: ClientCode(0x1122_3344),
         };
         let conn = connect(&path, &conn_data).await.expect("cannot connect");
         let (mut read_half, mut write_half) = conn.into_split();
@@ -250,17 +254,31 @@ mod tests {
             (b"SSH-2.0-_x", None),
             (b"garbage", None),
         ] {
-            assert_eq!(program_name(id), want, "{:?}", String::from_utf8_lossy(id));
+            assert_eq!(
+                ClientCode::program_name(id),
+                want,
+                "{:?}",
+                String::from_utf8_lossy(id)
+            );
         }
     }
 
     #[test]
     fn client_codes() {
         // zlib.crc32 (what wsproxy and the activity service compute).
-        assert_eq!(client_code(b"SSH-2.0-PuTTY_Release_0.70"), 0x0505_9f14);
-        assert_eq!(client_code(b"SSH-2.0-BePTT_Android_7.2.9"), 0x3684_d808);
-        assert_eq!(client_code(b"SSH-2.0-OpenSSH_9.6"), 0x294d_f8fe);
-        assert_eq!(client_code(b"nope"), 0);
+        assert_eq!(
+            ClientCode::ssh(b"SSH-2.0-PuTTY_Release_0.70"),
+            ClientCode(0x0505_9f14)
+        );
+        assert_eq!(
+            ClientCode::ssh(b"SSH-2.0-BePTT_Android_7.2.9"),
+            ClientCode(0x3684_d808)
+        );
+        assert_eq!(
+            ClientCode::ssh(b"SSH-2.0-OpenSSH_9.6"),
+            ClientCode(0x294d_f8fe)
+        );
+        assert_eq!(ClientCode::ssh(b"nope"), ClientCode(0));
     }
 
     #[test]
@@ -287,27 +305,36 @@ mod tests {
             ("  /5.0", None),
             ("(internal tool) 1.0", None),
         ] {
-            assert_eq!(agent_program(agent), want, "{agent:?}");
+            assert_eq!(ClientCode::agent_program(agent), want, "{agent:?}");
         }
         // A name longer than what a client code is taken from is cut down.
-        assert_eq!(agent_program(&"x".repeat(40)).map(|n| n.len()), Some(32));
+        assert_eq!(
+            ClientCode::agent_program(&"x".repeat(40)).map(|n| n.len()),
+            Some(32)
+        );
     }
 
     #[test]
-    fn agent_codes() {
+    fn websocket_codes() {
         // zlib.crc32 (what wsproxy and the activity service compute).
         assert_eq!(
-            agent_code("Mozilla/5.0 (Windows NT 10.0; Win64; x64)"),
-            0x066e_718e
+            ClientCode::websocket("Mozilla/5.0 (Windows NT 10.0; Win64; x64)"),
+            ClientCode(0x066e_718e)
         );
-        assert_eq!(agent_code("curl/8.5.0"), 0x03e0_1b4d);
-        assert_eq!(agent_code("python-urllib3/2.2.2"), 0x6745_1a79);
-        assert_eq!(agent_code("node v21.7.3"), 0x857f_e845);
+        assert_eq!(ClientCode::websocket("curl/8.5.0"), ClientCode(0x03e0_1b4d));
         assert_eq!(
-            agent_code("Safari (Macintosh; Intel Mac OS X)"),
-            0xe1b5_4e47
+            ClientCode::websocket("python-urllib3/2.2.2"),
+            ClientCode(0x6745_1a79)
         );
-        assert_eq!(agent_code("/5.0"), 0);
-        assert_eq!(agent_code("(internal tool) 1.0"), 0);
+        assert_eq!(
+            ClientCode::websocket("node v21.7.3"),
+            ClientCode(0x857f_e845)
+        );
+        assert_eq!(
+            ClientCode::websocket("Safari (Macintosh; Intel Mac OS X)"),
+            ClientCode(0xe1b5_4e47)
+        );
+        assert_eq!(ClientCode::websocket("/5.0"), ClientCode(0));
+        assert_eq!(ClientCode::websocket("(internal tool) 1.0"), ClientCode(0));
     }
 }

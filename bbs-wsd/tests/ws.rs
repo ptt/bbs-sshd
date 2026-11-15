@@ -249,7 +249,7 @@ async fn forwards_a_session() {
     );
     assert_eq!(
         &header[36..40],
-        &logind::agent_code(AGENT_FIREFOX).to_le_bytes()
+        &logind::ClientCode::websocket(AGENT_FIREFOX).0.to_le_bytes()
     );
 
     // No window size is announced to logind at all.
