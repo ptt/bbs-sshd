@@ -17,9 +17,8 @@ use tokio::sync::broadcast;
 use tokio::task::JoinSet;
 use tokio::time::sleep;
 
-/// What a server does with one accepted connection: gets the socket it came in
-/// on and the `logind` socket path to forward the connection to, by the kind of
-/// socket the client arrived over.
+/// Trait for accepting one connection. Implementation should start a connection
+/// to logind at `logind_path` and forward byte streams.
 ///
 /// Both methods default to logging the connection away and dropping the socket,
 /// for a daemon that has nothing to serve one kind of client with.
@@ -348,12 +347,12 @@ async fn run_one_server<A: Accept>(
         let accepted = tokio::select! {
             biased;
             _ = stop.recv() => break,
-            accepted = server.accept(&mut logind_paths) => accepted,
+            accepted = server.accept() => accepted,
         };
         match accepted {
             Ok(accepted) => {
                 misses = 0;
-                join_set.spawn(accepted.serve(accept.clone()));
+                join_set.spawn(accepted.serve(accept.clone(), logind_paths.next().clone()));
             }
             Err(e) => {
                 // A client that came in and went away before the accept landed.
@@ -409,11 +408,9 @@ enum Accepted {
         stream: TcpStream,
         peer: SocketAddr,
         lport: u16,
-        logind_path: Arc<PathBuf>,
     },
     Unix {
         stream: UnixStream,
-        logind_path: Arc<PathBuf>,
     },
 }
 
@@ -436,12 +433,8 @@ impl Server {
         }
     }
 
-    /// The next client of this listener's own kind. A client that arrives
-    /// takes the next `logind` path, a failed accept takes none.
-    async fn accept(
-        &self,
-        logind_paths: &mut RoundRobin<Arc<PathBuf>>,
-    ) -> std::io::Result<Accepted> {
+    /// The next client of this listener's own kind.
+    async fn accept(&self) -> std::io::Result<Accepted> {
         match self {
             Server::Tcp(listener, lport) => {
                 let (stream, peer) = listener.accept().await?;
@@ -449,15 +442,11 @@ impl Server {
                     stream,
                     peer,
                     lport: *lport,
-                    logind_path: logind_paths.next().clone(),
                 })
             }
             Server::Unix(listener) => {
                 let (stream, _peer) = listener.accept().await?;
-                Ok(Accepted::Unix {
-                    stream,
-                    logind_path: logind_paths.next().clone(),
-                })
+                Ok(Accepted::Unix { stream })
             }
         }
     }
@@ -466,18 +455,14 @@ impl Server {
 impl Accepted {
     /// Serve this client with the `Accept` method that fits the kind it came
     /// over, as one task to spawn.
-    async fn serve<A: Accept>(self, accept: A) {
+    async fn serve<A: Accept>(self, accept: A, logind_path: Arc<PathBuf>) {
         match self {
             Accepted::Tcp {
                 stream,
                 peer,
                 lport,
-                logind_path,
             } => accept.accept_tcp(stream, peer, lport, logind_path).await,
-            Accepted::Unix {
-                stream,
-                logind_path,
-            } => accept.accept_unix(stream, logind_path).await,
+            Accepted::Unix { stream } => accept.accept_unix(stream, logind_path).await,
         }
     }
 }
