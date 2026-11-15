@@ -219,7 +219,7 @@ where
         let (logind_reader, mut logind_writer) =
             logind::connect(logind_path, &conn_data).await?.into_split();
         info!(
-            "[client {}] Opened a WebSocket connection to logind {} (encoding {})",
+            "[client {}] Opened a connection to logind {} (encoding {})",
             handshake.remote,
             logind_path.display(),
             logind::encoding_name(handshake.encoding)
