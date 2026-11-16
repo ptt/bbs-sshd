@@ -71,6 +71,6 @@ fn main() {
         handler::DAEMON,
         prepared.listeners,
         prepared.logind_paths,
-        handler::Sshd::new(sshcfg),
+        move |logind_path| handler::Sshd::new(sshcfg.clone(), logind_path.clone()),
     ));
 }

@@ -18,33 +18,28 @@ use tokio::task::JoinSet;
 use tokio::time::sleep;
 
 /// Trait for accepting one connection. Implementation should start a connection
-/// to logind at `logind_path` and forward byte streams.
+/// to a `logind` socket and forward byte streams.
 ///
 /// Both methods default to logging the connection away and dropping the socket,
 /// for a daemon that has nothing to serve one kind of client with.
 ///
 /// It is responsible for logging its own failures; the accept loop ignores its result.
-pub trait Accept: Clone + Send + Sync + 'static {
+pub trait Accept: Sized + Send + Sync + 'static {
     /// Serve one TCP client.
     fn accept_tcp(
         self,
         stream: TcpStream,
         peer: SocketAddr,
         lport: u16,
-        logind_path: Arc<PathBuf>,
     ) -> impl Future<Output = ()> + Send {
-        let _ = (stream, peer, lport, logind_path);
+        let _ = (stream, peer, lport);
         error!("nothing to serve a TCP client with: closing the connection");
         std::future::ready(())
     }
 
     /// Serve one unix client.
-    fn accept_unix(
-        self,
-        stream: UnixStream,
-        logind_path: Arc<PathBuf>,
-    ) -> impl Future<Output = ()> + Send {
-        let _ = (stream, logind_path);
+    fn accept_unix(self, stream: UnixStream) -> impl Future<Output = ()> + Send {
+        let _ = stream;
         error!("nothing to serve a unix client with: closing the connection");
         std::future::ready(())
     }
@@ -113,7 +108,8 @@ fn bind_socket(entry: &str) -> Listener {
 /// What [`startup`] prepared for the binary to serve.
 pub struct Prepared {
     pub listeners: Vec<Listener>,
-    pub logind_paths: Vec<Arc<PathBuf>>,
+    /// The `logind` sockets, handed round-robin to the clients of every listener.
+    pub logind_paths: RoundRobin<Arc<PathBuf>>,
 }
 
 struct Logger {
@@ -272,7 +268,7 @@ pub fn startup(cfg: &DaemonConfig, name: &str, foreground: bool) -> Prepared {
 
     Prepared {
         listeners,
-        logind_paths,
+        logind_paths: RoundRobin::new(logind_paths),
     }
 }
 
@@ -293,12 +289,18 @@ pub fn build_runtime(workers: Option<usize>) -> tokio::runtime::Runtime {
 
 /// Accept on every listener until SIGINT/SIGTERM, then drain: stop accepting
 /// and wait for all clients to disconnect.
-pub async fn serve<A: Accept>(
+///
+/// `make_accept` builds the server that serves one client, for the `logind`
+/// socket picked for it.
+pub async fn serve<A, F>(
     name: &str,
     listeners: Vec<Listener>,
-    logind_paths: Vec<Arc<PathBuf>>,
-    accept: A,
-) {
+    logind_paths: RoundRobin<Arc<PathBuf>>,
+    make_accept: F,
+) where
+    A: Accept,
+    F: Fn(&Arc<PathBuf>) -> A + Clone + Send + 'static,
+{
     let (tx, _rx) = broadcast::channel(1);
 
     proctitle::set_title(format!("{name}: run"));
@@ -310,9 +312,9 @@ pub async fn serve<A: Accept>(
     for (idx, listener) in listeners.into_iter().enumerate() {
         join_set.spawn(run_one_server(
             listener,
-            RoundRobin::new(logind_paths.clone(), idx),
             tx.subscribe(),
-            accept.clone(),
+            logind_paths.clone_with_offset(idx),
+            make_accept.clone(),
         ));
     }
 
@@ -329,12 +331,15 @@ pub async fn serve<A: Accept>(
     info!("{name} stopped");
 }
 
-async fn run_one_server<A: Accept>(
+async fn run_one_server<A, F>(
     listener: Listener,
-    mut logind_paths: RoundRobin<Arc<PathBuf>>,
     mut stop: broadcast::Receiver<()>,
-    accept: A,
-) {
+    mut logind_paths: RoundRobin<Arc<PathBuf>>,
+    make_accept: F,
+) where
+    A: Accept,
+    F: Fn(&Arc<PathBuf>) -> A + Send + 'static,
+{
     let server = Server::start(listener).expect("unable to start listening");
 
     let mut join_set = JoinSet::new();
@@ -352,7 +357,8 @@ async fn run_one_server<A: Accept>(
         match accepted {
             Ok(accepted) => {
                 misses = 0;
-                join_set.spawn(accepted.serve(accept.clone(), logind_paths.next().clone()));
+                let logind_path = logind_paths.pick().clone();
+                join_set.spawn(accepted.serve(make_accept(&logind_path)));
             }
             Err(e) => {
                 // A client that came in and went away before the accept landed.
@@ -455,38 +461,48 @@ impl Server {
 impl Accepted {
     /// Serve this client with the `Accept` method that fits the kind it came
     /// over, as one task to spawn.
-    async fn serve<A: Accept>(self, accept: A, logind_path: Arc<PathBuf>) {
+    async fn serve<A: Accept>(self, accept: A) {
         match self {
             Accepted::Tcp {
                 stream,
                 peer,
                 lport,
-            } => accept.accept_tcp(stream, peer, lport, logind_path).await,
-            Accepted::Unix { stream } => accept.accept_unix(stream, logind_path).await,
+            } => accept.accept_tcp(stream, peer, lport).await,
+            Accepted::Unix { stream } => accept.accept_unix(stream).await,
         }
     }
 }
 
-/// Round-robin picker over `logind` sockets, starting at `offset` so that
-/// several listeners do not all start at the same entry.
-struct RoundRobin<T> {
+/// Round-robin picker.
+#[derive(Clone)]
+pub struct RoundRobin<T> {
     items: Vec<T>,
-    offset: usize,
+    cursor: usize,
 }
 
 impl<T> RoundRobin<T> {
-    fn new(items: Vec<T>, offset: usize) -> Self {
-        let offset = offset % items.len();
-        Self { items, offset }
+    fn new(items: Vec<T>) -> Self {
+        Self { items, cursor: 0 }
     }
 
-    fn next(&mut self) -> &T {
-        let item = &self.items[self.offset];
-        self.offset += 1;
-        if self.offset == self.items.len() {
-            self.offset = 0;
+    /// Returns the item at the cursor and advances the cursor.
+    fn pick(&mut self) -> &T {
+        let item = &self.items[self.cursor];
+        self.cursor += 1;
+        if self.cursor == self.items.len() {
+            self.cursor = 0;
         }
         item
+    }
+}
+
+impl<T: Clone> RoundRobin<T> {
+    /// A copy of the picker that starts at `offset` relative to current cursor.
+    fn clone_with_offset(&self, offset: usize) -> Self {
+        Self {
+            items: self.items.clone(),
+            cursor: (self.cursor + offset) % self.items.len(),
+        }
     }
 }
 
@@ -639,6 +655,19 @@ mod tests {
         drop(stream);
         drop(conn);
         drop(server);
+    }
+
+    #[test]
+    fn round_robin_starts_where_it_is_told_and_wraps() {
+        let picker = RoundRobin::new(vec![
+            Arc::new(PathBuf::from("/a.sock")),
+            Arc::new(PathBuf::from("/b.sock")),
+        ]);
+        // A copy told to start past the last entry comes back to the first one.
+        let mut picker = picker.clone_with_offset(2);
+        assert_eq!(**picker.pick(), PathBuf::from("/a.sock"));
+        assert_eq!(**picker.pick(), PathBuf::from("/b.sock"));
+        assert_eq!(**picker.pick(), PathBuf::from("/a.sock"));
     }
 
     #[test]

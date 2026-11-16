@@ -130,7 +130,7 @@ pub async fn serve_tcp(
     stream: TcpStream,
     peer: SocketAddr,
     lport: u16,
-    logind_path: Arc<PathBuf>,
+    logind_path: &Path,
     params: Arc<Params>,
 ) {
     // The socket options a client connection wants. A socket that refuses them
@@ -139,7 +139,7 @@ pub async fn serve_tcp(
         error!("[client {peer}] Unable to set socket options, closing the connection");
         return;
     };
-    let result = forwarding(stream, Some(peer), lport, &logind_path, params).await;
+    let result = forwarding(stream, Some(peer), lport, logind_path, params).await;
     if let Err((e, handshake)) = result {
         debug!(
             "[client {}] WebSocket session ended: {e}",
@@ -150,8 +150,8 @@ pub async fn serve_tcp(
 
 /// Serve one unix WebSocket client until it goes away, forwarding it to
 /// `logind`.
-pub async fn serve_unix(stream: UnixStream, logind_path: Arc<PathBuf>, params: Arc<Params>) {
-    let result = forwarding(stream, None, 0, &logind_path, params).await;
+pub async fn serve_unix(stream: UnixStream, logind_path: &Path, params: Arc<Params>) {
+    let result = forwarding(stream, None, 0, logind_path, params).await;
     if let Err((e, handshake)) = result {
         debug!(
             "[client {}] WebSocket session ended: {e}",
@@ -579,30 +579,28 @@ async fn client_to_logind<S: AsyncRead + AsyncWrite + Unpin>(
 pub const DAEMON: &str = "bbs-wsd";
 
 /// One forwarded `logind` session per accepted connection.
-#[derive(Clone)]
 pub struct Wsd {
     params: Arc<Params>,
+    /// The `logind` socket this client is forwarded to.
+    logind_path: Arc<PathBuf>,
 }
 
 impl Wsd {
-    pub fn new(params: Arc<Params>) -> Self {
-        Self { params }
+    pub fn new(params: Arc<Params>, logind_path: Arc<PathBuf>) -> Self {
+        Self {
+            params,
+            logind_path,
+        }
     }
 }
 
 impl Accept for Wsd {
-    async fn accept_tcp(
-        self,
-        stream: TcpStream,
-        peer: SocketAddr,
-        lport: u16,
-        logind_path: Arc<PathBuf>,
-    ) {
-        serve_tcp(stream, peer, lport, logind_path, self.params).await
+    async fn accept_tcp(self, stream: TcpStream, peer: SocketAddr, lport: u16) {
+        serve_tcp(stream, peer, lport, &self.logind_path, self.params).await
     }
 
-    async fn accept_unix(self, stream: UnixStream, logind_path: Arc<PathBuf>) {
-        serve_unix(stream, logind_path, self.params).await
+    async fn accept_unix(self, stream: UnixStream) {
+        serve_unix(stream, &self.logind_path, self.params).await
     }
 }
 

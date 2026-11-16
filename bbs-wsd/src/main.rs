@@ -36,6 +36,6 @@ fn main() {
         ws::DAEMON,
         prepared.listeners,
         prepared.logind_paths,
-        ws::Wsd::new(params),
+        move |logind_path| ws::Wsd::new(params.clone(), logind_path.clone()),
     ));
 }

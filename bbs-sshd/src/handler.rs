@@ -447,25 +447,23 @@ where
 }
 
 /// One [`russh`] session per accepted connection.
-#[derive(Clone)]
 pub struct Sshd {
     config: Arc<russh::server::Config>,
+    /// The `logind` socket this client is forwarded to.
+    logind_path: Arc<PathBuf>,
 }
 
 impl Sshd {
-    pub fn new(config: Arc<russh::server::Config>) -> Self {
-        Self { config }
+    pub fn new(config: Arc<russh::server::Config>, logind_path: Arc<PathBuf>) -> Self {
+        Self {
+            config,
+            logind_path,
+        }
     }
 }
 
 impl Accept for Sshd {
-    async fn accept_tcp(
-        self,
-        stream: TcpStream,
-        peer: SocketAddr,
-        lport: u16,
-        logind_path: Arc<PathBuf>,
-    ) {
+    async fn accept_tcp(self, stream: TcpStream, peer: SocketAddr, lport: u16) {
         // The socket options a client connection wants, which a unix socket has
         // none of. A socket that refuses them is closed, and the client has to
         // connect again.
@@ -473,7 +471,7 @@ impl Accept for Sshd {
             error!("[client {peer}] Unable to set socket options, closing the connection");
             return;
         };
-        let handler = Handler::new(peer, lport, logind_path);
+        let handler = Handler::new(peer, lport, self.logind_path);
         if let Err(e) = run_forwarding(self.config, stream, handler).await {
             debug!("[client {peer}] SSH session ended: {e}");
         }

@@ -187,7 +187,7 @@ async fn forwards_a_session() {
     let lport = listener.local_addr().unwrap().port();
     let server = tokio::spawn(async move {
         let (stream, peer) = listener.accept().await.unwrap();
-        ws::serve_tcp(stream, peer, lport, Arc::new(sock), params("/bbs")).await;
+        ws::serve_tcp(stream, peer, lport, &sock, params("/bbs")).await;
     });
 
     let (mut ws, response) = connect_async(request(
@@ -283,7 +283,7 @@ async fn passes_binary_data_verbatim() {
     let lport = listener.local_addr().unwrap().port();
     let server = tokio::spawn(async move {
         let (stream, peer) = listener.accept().await.unwrap();
-        ws::serve_tcp(stream, peer, lport, Arc::new(sock), params("/bbs")).await;
+        ws::serve_tcp(stream, peer, lport, &sock, params("/bbs")).await;
     });
 
     let (mut ws, response) = connect_async(request(
@@ -324,7 +324,7 @@ async fn serves_the_telnet_subprotocol() {
     let lport = listener.local_addr().unwrap().port();
     let server = tokio::spawn(async move {
         let (stream, peer) = listener.accept().await.unwrap();
-        ws::serve_tcp(stream, peer, lport, Arc::new(sock), params("/bbs")).await;
+        ws::serve_tcp(stream, peer, lport, &sock, params("/bbs")).await;
     });
 
     // What `new WebSocket(url, "telnet")` asks for.
@@ -372,7 +372,7 @@ async fn rejects_a_bad_handshake() {
     let server = tokio::spawn(async move {
         for _ in 0..3 {
             let (stream, peer) = listener.accept().await.unwrap();
-            ws::serve_tcp(stream, peer, lport, Arc::new(sock.clone()), params("/bbs")).await;
+            ws::serve_tcp(stream, peer, lport, &sock, params("/bbs")).await;
         }
     });
 
@@ -416,7 +416,7 @@ async fn serves_a_unix_socket() {
     let listener = unix_listener(&path);
     let server = tokio::spawn(async move {
         let (stream, _peer) = listener.accept().await.unwrap();
-        ws::serve_unix(stream, Arc::new(sock), params("/bbs")).await;
+        ws::serve_unix(stream, &sock, params("/bbs")).await;
     });
 
     let conn = UnixStream::connect(&path).await.expect("cannot connect");
@@ -476,7 +476,7 @@ async fn rejects_a_unix_client_whose_value_is_no_ip_port() {
     let server = tokio::spawn(async move {
         for _ in 0..3 {
             let (stream, _peer) = listener.accept().await.unwrap();
-            ws::serve_unix(stream, Arc::new(sock.clone()), params("/bbs")).await;
+            ws::serve_unix(stream, &sock, params("/bbs")).await;
         }
     });
 
@@ -514,7 +514,7 @@ async fn rejects_a_client_with_no_address_value() {
     // Only the configured header is read for a client, so a request with no
     // header of that name goes unserved, whatever its peer address.
     let dir = temp_dir("noaddr");
-    let logind = Arc::new(dir.join("logind.sock"));
+    let logind = dir.join("logind.sock");
     let sock = dir.join("logind.sock");
     let _listener = UnixListener::bind(&sock).expect("cannot bind the logind socket");
 
@@ -524,7 +524,7 @@ async fn rejects_a_client_with_no_address_value() {
         let logind = logind.clone();
         async move {
             let (stream, peer) = listener.accept().await.unwrap();
-            ws::serve_tcp(stream, peer, lport, logind, params("/bbs")).await;
+            ws::serve_tcp(stream, peer, lport, &logind, params("/bbs")).await;
         }
     });
 
@@ -540,7 +540,7 @@ async fn rejects_a_client_with_no_address_value() {
     let listener = unix_listener(&path);
     let unix = tokio::spawn(async move {
         let (stream, _peer) = listener.accept().await.unwrap();
-        ws::serve_unix(stream, logind, params_disabled("/bbs")).await;
+        ws::serve_unix(stream, &logind, params_disabled("/bbs")).await;
     });
 
     let conn = UnixStream::connect(&path).await.expect("cannot connect");
@@ -569,7 +569,7 @@ async fn serves_a_tcp_client_by_its_peer_when_the_header_is_disabled() {
             stream,
             peer,
             lport,
-            Arc::new(sock),
+            &sock,
             params_with("/bbs", None, Some("x-bbs-secure"), None),
         )
         .await;
@@ -617,7 +617,7 @@ async fn serves_a_unix_socket_over_an_abstract_name() {
     let listener = unix_listener(&path);
     let server = tokio::spawn(async move {
         let (stream, _peer) = listener.accept().await.unwrap();
-        ws::serve_unix(stream, Arc::new(sock), params("/bbs")).await;
+        ws::serve_unix(stream, &sock, params("/bbs")).await;
     });
 
     let conn = UnixStream::connect(&path)
@@ -660,7 +660,7 @@ async fn rejects_a_unix_handshake() {
     let server = tokio::spawn(async move {
         for _ in 0..3 {
             let (stream, _peer) = listener.accept().await.unwrap();
-            ws::serve_unix(stream, Arc::new(sock.clone()), params("/bbs")).await;
+            ws::serve_unix(stream, &sock, params("/bbs")).await;
         }
     });
 
@@ -708,7 +708,7 @@ async fn ends_a_session_when_the_client_vanishes() {
     let listener = unix_listener(&path);
     let server = tokio::spawn(async move {
         let (stream, _peer) = listener.accept().await.unwrap();
-        ws::serve_unix(stream, Arc::new(sock), params("/bbs")).await;
+        ws::serve_unix(stream, &sock, params("/bbs")).await;
     });
 
     let conn = UnixStream::connect(&path).await.expect("cannot connect");
@@ -767,7 +767,7 @@ async fn rejects_a_client_with_no_secure_flag() {
     let server = tokio::spawn(async move {
         for _ in 0..2 {
             let (stream, peer) = listener.accept().await.unwrap();
-            ws::serve_tcp(stream, peer, lport, Arc::new(sock.clone()), params("/bbs")).await;
+            ws::serve_tcp(stream, peer, lport, &sock, params("/bbs")).await;
         }
     });
 
@@ -805,7 +805,7 @@ async fn ignores_query_strings() {
     let lport = listener.local_addr().unwrap().port();
     let server = tokio::spawn(async move {
         let (stream, peer) = listener.accept().await.unwrap();
-        ws::serve_tcp(stream, peer, lport, Arc::new(sock), params_disabled("/bbs")).await;
+        ws::serve_tcp(stream, peer, lport, &sock, params_disabled("/bbs")).await;
     });
 
     // A query string is just part of the path we match; nothing is read out of
@@ -851,7 +851,7 @@ async fn reports_the_local_port_of_the_header() {
     let lport = listener.local_addr().unwrap().port();
     let server = tokio::spawn(async move {
         let (stream, peer) = listener.accept().await.unwrap();
-        ws::serve_tcp(stream, peer, lport, Arc::new(sock), params_proxy("/bbs")).await;
+        ws::serve_tcp(stream, peer, lport, &sock, params_proxy("/bbs")).await;
     });
 
     // A proxy carries the port the client connected to, and that goes to logind
@@ -886,7 +886,7 @@ async fn reports_the_listener_port_of_a_disabled_local_port_header() {
     let lport = listener.local_addr().unwrap().port();
     let server = tokio::spawn(async move {
         let (stream, peer) = listener.accept().await.unwrap();
-        ws::serve_tcp(stream, peer, lport, Arc::new(sock), params("/bbs")).await;
+        ws::serve_tcp(stream, peer, lport, &sock, params("/bbs")).await;
     });
 
     // The header is disabled, so the port of the TCP listener goes to logind,
@@ -921,7 +921,7 @@ async fn reports_a_unix_session_without_a_local_port() {
     let listener = unix_listener(&path);
     let server = tokio::spawn(async move {
         let (stream, _peer) = listener.accept().await.unwrap();
-        ws::serve_unix(stream, Arc::new(sock), params("/bbs")).await;
+        ws::serve_unix(stream, &sock, params("/bbs")).await;
     });
 
     // A unix listener has no port of its own to report once the header is
@@ -960,14 +960,7 @@ async fn rejects_a_client_with_no_local_port() {
     let server = tokio::spawn(async move {
         for _ in 0..4 {
             let (stream, peer) = listener.accept().await.unwrap();
-            ws::serve_tcp(
-                stream,
-                peer,
-                lport,
-                Arc::new(sock.clone()),
-                params_proxy("/bbs"),
-            )
-            .await;
+            ws::serve_tcp(stream, peer, lport, &sock, params_proxy("/bbs")).await;
         }
     });
 
@@ -1039,7 +1032,7 @@ async fn honours_the_configured_header() {
             stream,
             peer,
             lport,
-            Arc::new(sock),
+            &sock,
             params_ip_only("/bbs", "client-ip"),
         )
         .await;
@@ -1084,7 +1077,7 @@ async fn reads_the_first_header_of_the_name() {
     let lport = listener.local_addr().unwrap().port();
     let server = tokio::spawn(async move {
         let (stream, peer) = listener.accept().await.unwrap();
-        ws::serve_tcp(stream, peer, lport, Arc::new(sock), params("/bbs")).await;
+        ws::serve_tcp(stream, peer, lport, &sock, params("/bbs")).await;
     });
 
     // Of several headers of the configured name the first one is read, taken
@@ -1122,7 +1115,7 @@ async fn rejects_a_tcp_client_with_a_bare_address() {
     let server = tokio::spawn(async move {
         for _ in 0..2 {
             let (stream, peer) = listener.accept().await.unwrap();
-            ws::serve_tcp(stream, peer, lport, Arc::new(sock.clone()), params("/bbs")).await;
+            ws::serve_tcp(stream, peer, lport, &sock, params("/bbs")).await;
         }
     });
 
@@ -1158,7 +1151,7 @@ async fn rejects_a_value_that_is_no_ip_port() {
     let lport = listener.local_addr().unwrap().port();
     let server = tokio::spawn(async move {
         let (stream, peer) = listener.accept().await.unwrap();
-        ws::serve_tcp(stream, peer, lport, Arc::new(sock), params("/bbs")).await;
+        ws::serve_tcp(stream, peer, lport, &sock, params("/bbs")).await;
     });
 
     // The value is taken as it is, so a list of addresses is no `ip:port`.
