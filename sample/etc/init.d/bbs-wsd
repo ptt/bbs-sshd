@@ -16,6 +16,7 @@ set -e
 EXE="/opt/bbs-wsd"
 CONF="/etc/bbs-wsd.toml"
 PID_FILE="/home/bbs/run/bbs-wsd.pid"
+NAME_RUN="bbs-wsd: run"
 
 test -x "$EXE" || exit 0
 
@@ -49,7 +50,7 @@ case "$1" in
 	;;
   stop)
 	log_daemon_msg "Stopping BBS WebSocket server" "bbs-wsd" || true
-	if start-stop-daemon --stop --quiet --oknodo --pidfile "$PID_FILE" --signal TERM --exec "$EXE"; then
+	if start-stop-daemon --stop --quiet --oknodo --pidfile "$PID_FILE" --signal QUIT --name "$NAME_RUN"; then
 	    log_end_msg 0 || true
 	else
 	    log_end_msg 1 || true
@@ -58,7 +59,7 @@ case "$1" in
 
   reload)
 	log_daemon_msg "Gracefully restarting BBS WebSocket server to reload configuration" "bbs-wsd" || true
-	if start-stop-daemon --stop --signal INT --quiet --oknodo --pidfile "$PID_FILE" --exec "$EXE"; then
+	if start-stop-daemon --stop --signal INT --quiet --oknodo --pidfile "$PID_FILE" --name "$NAME_RUN"; then
 	    /bin/rm -f "$PID_FILE"
 	    if start-stop-daemon --start --quiet --oknodo --chuid 0:0 --pidfile "$PID_FILE" --exec "$EXE" -- -f "$CONF"; then
 		log_end_msg 0 || true
@@ -72,7 +73,7 @@ case "$1" in
 
   restart)
 	log_daemon_msg "Restarting BBS WebSocket server" "bbs-wsd" || true
-	start-stop-daemon --stop --quiet --oknodo --retry 30 --signal TERM --pidfile "$PID_FILE" --exec "$EXE"
+	start-stop-daemon --stop --quiet --oknodo --retry 30 --signal QUIT --pidfile "$PID_FILE" --name "$NAME_RUN"
 	if start-stop-daemon --start --quiet --oknodo --chuid 0:0 --pidfile "$PID_FILE" --exec "$EXE" -- -f "$CONF"; then
 	    log_end_msg 0 || true
 	else
