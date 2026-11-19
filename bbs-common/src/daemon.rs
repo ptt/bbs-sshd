@@ -342,7 +342,7 @@ async fn run_one_server<A, F>(
 {
     let server = Server::start(listener).expect("unable to start listening");
 
-    let mut join_set = JoinSet::new();
+    let (client_tx, mut client_rx) = broadcast::channel::<()>(1);
     // One loop serves both kinds: `Server::accept` takes the next client of
     // the kind its listener is, and `Accepted::serve` answers it with the
     // `Accept` method for that kind. Accepts that fail in a row are waited
@@ -358,7 +358,12 @@ async fn run_one_server<A, F>(
             Ok(accepted) => {
                 misses = 0;
                 let logind_path = logind_paths.pick().clone();
-                join_set.spawn(accepted.serve(make_accept(&logind_path)));
+                let accept = make_accept(&logind_path);
+                let client_tx = client_tx.clone();
+                tokio::spawn(async move {
+                    let _tx = client_tx;
+                    accepted.serve(accept).await
+                });
             }
             Err(e) => {
                 // A client that came in and went away before the accept landed.
@@ -375,10 +380,11 @@ async fn run_one_server<A, F>(
             }
         }
     }
-    // Dropping `server` stops accepting for this listener, and this waits out
-    // the clients that are still connected.
+    // Stop accepting connections on this listener.
     drop(server);
-    while join_set.join_next().await.is_some() {}
+    // Wait for all the connections to end.
+    drop(client_tx);
+    let _ = client_rx.recv().await;
 }
 
 /// The wait an accept loop starts with after a failed accept, and the most its
